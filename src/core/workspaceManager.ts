@@ -85,6 +85,9 @@ export function ensureParentDirectory(destPath: string): void {
  * Only removes if it exists and strictly within the workspace root.
  */
 export function cleanupIncompleteDirectory(destPath: string, workspaceRoot?: string): boolean {
+  if (!destPath || typeof destPath !== 'string') {
+    return false;
+  }
   const root = workspaceRoot || getFirstPrWorkspaceRoot();
   const resolved = path.resolve(destPath);
   const resolvedRoot = path.resolve(root);

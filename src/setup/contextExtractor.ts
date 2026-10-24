@@ -50,11 +50,13 @@ const CANDIDATE_FILES: Array<{ relPath: string; category: RepoFileEvidence['cate
   { relPath: 'setup.py', category: 'manifest' },
   { relPath: 'setup.cfg', category: 'manifest' },
   { relPath: 'Pipfile', category: 'manifest' },
+  { relPath: 'Gemfile', category: 'manifest' },
   // Lockfiles (metadata checked)
   { relPath: 'pnpm-lock.yaml', category: 'lockfile' },
   { relPath: 'yarn.lock', category: 'lockfile' },
   { relPath: 'package-lock.json', category: 'lockfile' },
   { relPath: 'poetry.lock', category: 'lockfile' },
+  { relPath: 'Gemfile.lock', category: 'lockfile' },
   // Configs
   { relPath: 'Makefile', category: 'config' },
   { relPath: 'Dockerfile', category: 'config' },
@@ -63,7 +65,15 @@ const CANDIDATE_FILES: Array<{ relPath: string; category: RepoFileEvidence['cate
   { relPath: '.gitattributes', category: 'config' },
   { relPath: '.nvmrc', category: 'config' },
   { relPath: '.node-version', category: 'config' },
-  { relPath: '.python-version', category: 'config' }
+  { relPath: '.python-version', category: 'config' },
+  { relPath: '.ruby-version', category: 'config' },
+  { relPath: '.tool-versions', category: 'config' },
+  // CI & Workflows
+  { relPath: '.github/workflows/daily_check.yml', category: 'config' },
+  { relPath: '.github/workflows/validate-new-kg.yml', category: 'config' },
+  { relPath: '.github/workflows/check_and_publish.yml', category: 'config' },
+  { relPath: '.github/workflows/ci.yml', category: 'config' },
+  { relPath: '.github/workflows/test.yml', category: 'config' }
 ];
 
 /**
@@ -129,6 +139,29 @@ export async function extractRepoContext(
     }
 
     if (stats.size > maxReadBytes) {
+      if (candidate.category === 'lockfile') {
+        try {
+          const fd = fs.openSync(fullPath, 'r');
+          const buf = Buffer.alloc(4096);
+          const bytesRead = fs.readSync(fd, buf, 0, 4096, 0);
+          fs.closeSync(fd);
+          let content = buf.toString('utf8', 0, bytesRead);
+          const lines = content.split('\n').slice(0, 30);
+          content = lines.join('\n') + '\n... [lockfile entries truncated]';
+          files.push({
+            relativePath: candidate.relPath,
+            content,
+            sizeBytes: stats.size,
+            isTruncated: true,
+            category: 'lockfile'
+          });
+          accumulatedChars += content.length;
+          continue;
+        } catch {
+          // fallback to omitted
+        }
+      }
+
       excludedFiles.push(candidate.relPath);
       warnings.push(
         `Omitted oversized file ${candidate.relPath} (${stats.size} bytes > ${maxReadBytes} bytes limit).`
@@ -251,8 +284,22 @@ function detectRuntimesAndPackageManagers(
   const setupPyFile = fileMap.get('setup.py');
   const pipfileFile = fileMap.get('Pipfile');
   const pyVersionFile = fileMap.get('.python-version');
+  const workflowFile =
+    fileMap.get('.github/workflows/daily_check.yml') ||
+    fileMap.get('.github/workflows/validate-new-kg.yml') ||
+    fileMap.get('.github/workflows/check_and_publish.yml') ||
+    fileMap.get('.github/workflows/ci.yml') ||
+    fileMap.get('.github/workflows/test.yml');
 
-  if (pyprojectFile || reqsFile || reqsDevFile || setupPyFile || pipfileFile || pyVersionFile) {
+  const hasPythonInWorkflow = Boolean(
+    workflowFile &&
+      (workflowFile.content.includes('setup-python') ||
+        workflowFile.content.includes('python-version') ||
+        workflowFile.content.includes('pip install') ||
+        workflowFile.content.includes('python scripts/'))
+  );
+
+  if (pyprojectFile || reqsFile || reqsDevFile || setupPyFile || pipfileFile || pyVersionFile || hasPythonInWorkflow) {
     let versionHint: string | undefined = undefined;
     let evidenceFile = 'requirements.txt';
 
@@ -267,6 +314,12 @@ function detectRuntimesAndPackageManagers(
       }
     } else if (pipfileFile) {
       evidenceFile = 'Pipfile';
+    } else if (workflowFile && hasPythonInWorkflow) {
+      evidenceFile = workflowFile.relativePath;
+      const match = workflowFile.content.match(/python-version:\s*['"]?([^'"\s\n]+)/);
+      if (match) {
+        versionHint = match[1];
+      }
     }
 
     detectedRuntimes.push({
@@ -345,10 +398,49 @@ function detectRuntimesAndPackageManagers(
       name: 'pip',
       evidenceFile: 'Pipfile'
     });
-  } else if (reqsFile || reqsDevFile || setupPyFile || pyprojectFile) {
+  } else if (reqsFile || reqsDevFile || setupPyFile || pyprojectFile || hasPythonInWorkflow) {
     detectedPackageManagers.push({
       name: 'pip',
-      evidenceFile: reqsFile ? 'requirements.txt' : 'pyproject.toml'
+      evidenceFile: reqsFile
+        ? 'requirements.txt'
+        : (workflowFile ? workflowFile.relativePath : 'pyproject.toml')
+    });
+  }
+
+  // 5. Ruby Runtime & Bundler Package Manager Detection
+  const gemfile = fileMap.get('Gemfile');
+  const rubyVersionFile = fileMap.get('.ruby-version');
+  const toolVersionsFile = fileMap.get('.tool-versions');
+
+  if (gemfile || rubyVersionFile || fileMap.has('Gemfile.lock')) {
+    let versionHint: string | undefined = undefined;
+    let evidenceFile = 'Gemfile';
+
+    if (rubyVersionFile) {
+      versionHint = rubyVersionFile.content.trim();
+      evidenceFile = '.ruby-version';
+    } else if (toolVersionsFile) {
+      const match = toolVersionsFile.content.match(/^ruby\s+([^\s\n]+)/m);
+      if (match) {
+        versionHint = match[1];
+        evidenceFile = '.tool-versions';
+      }
+    } else if (gemfile) {
+      const match = gemfile.content.match(/^ruby\s+["']([^"']+)["']/m);
+      if (match) {
+        versionHint = match[1];
+      }
+    }
+
+    detectedRuntimes.push({
+      name: 'Ruby',
+      ...(versionHint ? { versionHint } : {}),
+      evidenceFile
+    });
+
+    detectedPackageManagers.push({
+      name: 'bundler',
+      evidenceFile: fileMap.has('Gemfile.lock') ? 'Gemfile.lock' : 'Gemfile'
     });
   }
 

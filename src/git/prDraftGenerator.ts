@@ -30,7 +30,7 @@ export interface StructuredPrDraft {
 }
 
 const SECRET_PATTERNS = [
-  /ghp_[a-zA-Z0-9]{20,}/g,
+  /ghp_[a-zA-Z0-9_]{20,}/g,
   /github_pat_[a-zA-Z0-9_]{20,}/g,
   /Bearer\s+[a-zA-Z0-9._\-]{20,}/gi,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,

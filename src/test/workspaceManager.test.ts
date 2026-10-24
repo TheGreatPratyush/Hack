@@ -87,4 +87,10 @@ describe('workspaceManager', () => {
 
     fs.rmSync(outsideDir, { recursive: true, force: true });
   });
+
+  it('handles invalid or empty destination path safely', () => {
+    assert.equal(cleanupIncompleteDirectory(''), false);
+    assert.equal(cleanupIncompleteDirectory(undefined as any), false);
+    assert.equal(cleanupIncompleteDirectory(null as any), false);
+  });
 });

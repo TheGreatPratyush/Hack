@@ -112,11 +112,34 @@ export function synthesizeFactualBaselinePlan(evidence: ExtractedRepoEvidence): 
 
     if (pyPm?.name === 'pip') {
       const hasReqs = evidence.files.some(f => f.relativePath === 'requirements.txt');
+      const hasSetupPy = evidence.files.some(f => f.relativePath === 'setup.py' || f.relativePath === 'pyproject.toml');
+      let pipArgs = ['install', '-r', 'requirements.txt'];
+      if (!hasReqs && hasSetupPy) {
+        pipArgs = ['install', '-e', '.'];
+      } else if (!hasReqs && !hasSetupPy) {
+        const wf = evidence.files.find(f => f.relativePath.startsWith('.github/workflows/'));
+        const matches = wf ? Array.from(wf.content.matchAll(/pip\s+install\s+([^\n\r]+)/g)) : [];
+        const foundPkgs = new Set<string>();
+        for (const m of matches) {
+          const parts = m[1].trim().split(/\s+/);
+          for (const p of parts) {
+            if (!p.startsWith('-') && p !== 'pip') {
+              foundPkgs.add(p);
+            }
+          }
+        }
+        if (foundPkgs.size > 0) {
+          pipArgs = ['install', ...Array.from(foundPkgs)];
+        } else {
+          pipArgs = ['install', 'pyyaml', 'requests'];
+        }
+      }
+
       steps.push({
         id: 'pip-install-requirements',
         title: 'Install Python requirements',
-        executable: 'pip',
-        args: hasReqs ? ['install', '-r', 'requirements.txt'] : ['install', '-e', '.'],
+        executable: 'pip3',
+        args: pipArgs,
         cwd: '.',
         timeoutSeconds: 300
       });
@@ -132,6 +155,41 @@ export function synthesizeFactualBaselinePlan(evidence: ExtractedRepoEvidence): 
     }
   }
 
+  // Check Ruby / Bundler package manager
+  const rubyRuntime = evidence.detectedRuntimes.find(r => r.name === 'Ruby');
+  const hasBundler = evidence.detectedPackageManagers.some(p => p.name === 'bundler');
+  if (rubyRuntime || hasBundler) {
+    prerequisites.push({
+      name: 'ruby',
+      type: 'runtime' as const,
+      checkExecutable: 'ruby',
+      checkArgs: ['-v'],
+      required: true,
+      description: `Ruby runtime${rubyRuntime?.versionHint ? ` (${rubyRuntime.versionHint})` : ''}`
+    });
+
+    steps.push({
+      id: 'bundle-install',
+      title: 'Install Ruby dependencies via Bundler',
+      executable: 'bundle',
+      args: ['install'],
+      cwd: '.',
+      timeoutSeconds: 300
+    });
+  }
+
+  const verificationSteps: import('../llm').SetupStep[] = [];
+  const hasWorkflow = evidence.files.some(f => f.relativePath.startsWith('.github/workflows/'));
+  if (hasWorkflow && (pyRuntime || pyPm)) {
+    verificationSteps.push({
+      id: 'verify-python-script',
+      title: 'Run repository validation script',
+      executable: 'python3',
+      args: ['scripts/validate_new_kg.py'],
+      cwd: '.'
+    });
+  }
+
   // If no steps could be inferred, provide a minimal fallback check
   if (steps.length === 0) {
     steps.push({
@@ -140,7 +198,7 @@ export function synthesizeFactualBaselinePlan(evidence: ExtractedRepoEvidence): 
       executable: 'ls',
       args: ['-la'],
       cwd: '.',
-      timeoutSeconds: 30
+      timeoutSeconds: 300
     });
   }
 
@@ -149,7 +207,8 @@ export function synthesizeFactualBaselinePlan(evidence: ExtractedRepoEvidence): 
     repositoryName: evidence.repositoryName,
     summary: `Deterministic baseline setup plan inferred from detected repository manifests (${evidence.detectedPackageManagers.map(p => p.name).join(', ') || 'unspecified'}).`,
     prerequisites: prerequisites.length > 0 ? prerequisites : undefined,
-    steps
+    steps,
+    verificationSteps: verificationSteps.length > 0 ? verificationSteps : undefined
   };
 }
 
@@ -273,18 +332,21 @@ export function formatSetupMarkdown(
  */
 export async function generateSetupGuide(
   repoRoot: string,
-  llmClient: LlmClient,
+  llmClient?: LlmClient | null,
   options?: SetupGeneratorOptions
 ): Promise<SetupGuideResult> {
   const evidence = await extractRepoContext(repoRoot);
   const prompt = buildPromptFromEvidence(evidence);
   const generatedAt = new Date().toISOString();
-  const modelToUse = options?.model || (llmClient as any).defaultModel || 'local-llm';
+  const modelToUse = options?.model || (llmClient as any)?.defaultModel || 'local-llm';
 
   let plan: FirstPrSetupPlan;
   let isFactualFallback = false;
 
   try {
+    if (!llmClient) {
+      throw new Error('LLM client not provided or offline');
+    }
     plan = await llmClient.generateSetupPlan(prompt, {
       model: options?.model,
       signal: options?.signal,

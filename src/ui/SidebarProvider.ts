@@ -27,7 +27,7 @@ import {
   PullRequestDetails,
 } from '../git/prService';
 import { FirstPrSetupPlan, OllamaClient } from '../llm';
-import { SetupExecutionAgent, generateSetupGuide } from '../setup';
+import { SetupExecutionAgent, generateSetupGuide, SetupOrchestrator } from '../setup';
 
 export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'firstpr.sidebarView';
@@ -46,6 +46,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   private _activeBranchName: string = '';
   private _activeSetupPlan: FirstPrSetupPlan | null = null;
   private _activeSetupAgent: SetupExecutionAgent | null = null;
+  private _setupOrchestrator: SetupOrchestrator | null = null;
 
   public get activeDestPath(): string | null {
     return this._activeDestPath;
@@ -65,6 +66,10 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
 
   public get activeSetupAgent(): SetupExecutionAgent | null {
     return this._activeSetupAgent;
+  }
+
+  public get setupOrchestrator(): SetupOrchestrator | null {
+    return this._setupOrchestrator;
   }
 
   public get currentView(): vscode.WebviewView | undefined {
@@ -146,6 +151,24 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
           break;
         case 'executeSetupStep':
           await this._handleExecuteSetupStep(message.stepId, Boolean(message.userApproved));
+          break;
+        case 'startSetupOrchestration':
+          await this._handleStartSetupOrchestration();
+          break;
+        case 'approveSetupStep':
+          await this._handleApproveSetupStep();
+          break;
+        case 'rejectSetupStep':
+          this._handleRejectSetupStep();
+          break;
+        case 'skipSetupStep':
+          this._handleSkipSetupStep();
+          break;
+        case 'retrySetupStep':
+          this._handleRetrySetupStep();
+          break;
+        case 'applyRecoveryStep':
+          this._handleApplyRecoveryStep();
           break;
         case 'openExternalUrl':
           await this._handleOpenExternalUrl(message.url);
@@ -785,6 +808,76 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async _handleStartSetupOrchestration(): Promise<void> {
+    if (!this._activeDestPath) {
+      this._postToWebview({ command: 'error', message: 'No active repository destination.' });
+      return;
+    }
+    if (this._isBusy) {
+      this._postToWebview({ command: 'error', message: 'An operation is currently in progress.' });
+      return;
+    }
+
+    try {
+      const client = new OllamaClient();
+      this._setupOrchestrator = new SetupOrchestrator(this._activeDestPath, {
+        llmClient: client,
+        onStateChange: (snapshot) => {
+          this._postToWebview({
+            command: 'orchestratorUpdate',
+            snapshot
+          });
+        },
+        onStreamOutput: (stepId, stream, chunk) => {
+          this._postToWebview({
+            command: 'orchestratorStream',
+            stepId,
+            stream,
+            chunk
+          });
+        }
+      });
+
+      await this._setupOrchestrator.initialize();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this._postToWebview({ command: 'error', message: `Setup orchestration failed: ${msg}` });
+    }
+  }
+
+  private async _handleApproveSetupStep(): Promise<void> {
+    if (!this._setupOrchestrator) {
+      this._postToWebview({ command: 'error', message: 'No active setup session.' });
+      return;
+    }
+    try {
+      await this._setupOrchestrator.approveAndExecuteCurrentStep();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this._postToWebview({ command: 'error', message: `Step execution failed: ${msg}` });
+    }
+  }
+
+  private _handleRejectSetupStep(): void {
+    if (!this._setupOrchestrator) return;
+    this._setupOrchestrator.rejectCurrentStep();
+  }
+
+  private _handleSkipSetupStep(): void {
+    if (!this._setupOrchestrator) return;
+    this._setupOrchestrator.skipCurrentStep();
+  }
+
+  private _handleRetrySetupStep(): void {
+    if (!this._setupOrchestrator) return;
+    this._setupOrchestrator.retryCurrentStep();
+  }
+
+  private _handleApplyRecoveryStep(): void {
+    if (!this._setupOrchestrator) return;
+    this._setupOrchestrator.applyRecoveryStep();
+  }
+
   private async _handleOpenExternalUrl(rawUrl: string): Promise<void> {
     try {
       if (rawUrl) {
@@ -1167,6 +1260,20 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       display: block;
     }
     .diff-line-ctx { color: var(--vscode-descriptionForeground); display: block; }
+    .prereq-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      margin-top: 6px;
+    }
+    .prereq-table th, .prereq-table td {
+      padding: 4px 6px;
+      border: 1px solid var(--vscode-widget-border, #333);
+      text-align: left;
+    }
+    .badge-satisfied { background: #238636; color: #fff; padding: 1px 4px; border-radius: 2px; font-size: 9.5px; font-weight: 700; }
+    .badge-incompatible { background: #d29922; color: #fff; padding: 1px 4px; border-radius: 2px; font-size: 9.5px; font-weight: 700; }
+    .badge-missing { background: #da3633; color: #fff; padding: 1px 4px; border-radius: 2px; font-size: 9.5px; font-weight: 700; }
   </style>
 </head>
 <body>
@@ -1246,7 +1353,72 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     <div id="missing-checks-note" style="margin-top:8px;font-size:11px;color:var(--vscode-descriptionForeground);"></div>
 
     <div class="btn-group" style="margin-top:12px;">
+      <button id="start-orchestrator-btn" class="primary-btn" style="width:100%;">Plan & Set Up Repository (Verify Prerequisites)</button>
+    </div>
+    <div class="btn-group" style="margin-top:6px;">
       <button id="open-vscode-btn" class="secondary-btn" style="width:100%;">Open in VS Code</button>
+    </div>
+  </div>
+
+  <!-- Setup Orchestrator Card -->
+  <div id="setup-orchestrator-card" class="card info" style="display:none;margin-top:12px;">
+    <div class="stage-title" style="display:flex;justify-content:space-between;align-items:center;">
+      <span>Setup & Prerequisite Orchestrator</span>
+      <span id="orchestrator-state-badge" class="tag" style="text-transform:uppercase;">IDLE</span>
+    </div>
+
+    <!-- Prerequisites Section -->
+    <div id="orchestrator-prereq-section" style="margin-top:10px;">
+      <div class="section-subtitle">Host Prerequisites Evaluation</div>
+      <div id="orchestrator-prereq-list"></div>
+    </div>
+
+    <!-- Active Step Approval Section -->
+    <div id="orchestrator-step-section" class="card" style="display:none;margin-top:12px;border:1px solid var(--vscode-inputValidation-infoBorder, #007acc);">
+      <div class="stage-title" style="display:flex;justify-content:space-between;">
+        <span id="active-step-title">Active Step</span>
+        <span id="active-step-risk" class="tag">RISK</span>
+      </div>
+      <div id="active-step-what" style="font-size:11px;margin-top:4px;"></div>
+      <div id="active-step-why" style="font-size:11px;color:var(--vscode-descriptionForeground);margin-top:2px;"></div>
+      <div class="evidence-block" id="active-step-cmd" style="margin-top:6px;font-weight:600;"></div>
+      <div id="active-step-impact" style="font-size:10.5px;color:var(--vscode-descriptionForeground);margin-top:4px;"></div>
+      <div id="active-step-verif" style="font-size:10.5px;color:var(--vscode-descriptionForeground);margin-top:2px;"></div>
+
+      <div class="btn-group" style="margin-top:10px;">
+        <button id="approve-step-btn" class="success-btn" style="flex:2;">Approve & Execute Step</button>
+        <button id="reject-step-btn" class="danger-btn" style="flex:1;">Reject</button>
+        <button id="skip-step-btn" class="secondary-btn" style="flex:1;">Skip</button>
+      </div>
+    </div>
+
+    <!-- Execution Output / Progress -->
+    <div id="orchestrator-console-section" style="display:none;margin-top:10px;">
+      <div class="section-subtitle">Live Step Output</div>
+      <div id="orchestrator-console" class="evidence-block" style="max-height:160px;overflow-y:auto;white-space:pre-wrap;"></div>
+    </div>
+
+    <!-- Recovery Card -->
+    <div id="orchestrator-recovery-section" class="card error" style="display:none;margin-top:10px;">
+      <div class="stage-title">Step Execution Failed</div>
+      <div id="orchestrator-recovery-error" style="font-size:11px;margin-top:4px;"></div>
+      <div class="btn-group" style="margin-top:8px;">
+        <button id="retry-step-btn" class="primary-btn">Retry Step</button>
+        <button id="apply-recovery-btn" class="secondary-btn" style="display:none;">Apply Fallback & Continue</button>
+      </div>
+    </div>
+
+    <!-- Completed Steps -->
+    <div id="orchestrator-completed-section" style="display:none;margin-top:10px;">
+      <div class="section-subtitle">Completed Steps</div>
+      <div id="orchestrator-completed-list" style="font-size:11px;"></div>
+    </div>
+
+    <!-- Readiness Report Section -->
+    <div id="orchestrator-readiness-section" class="card" style="display:none;margin-top:12px;">
+      <div class="stage-title" id="readiness-verdict-title">Readiness Verdict</div>
+      <div id="readiness-summary" class="stage-detail" style="margin-top:4px;"></div>
+      <div id="readiness-details" style="font-size:11px;margin-top:6px;"></div>
     </div>
   </div>
 
@@ -1426,6 +1598,34 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     const errorCard = document.getElementById('error-card');
     const errorMessage = document.getElementById('error-message');
 
+    const setupOrchestratorCard = document.getElementById('setup-orchestrator-card');
+    const orchestratorStateBadge = document.getElementById('orchestrator-state-badge');
+    const orchestratorPrereqList = document.getElementById('orchestrator-prereq-list');
+    const orchestratorStepSection = document.getElementById('orchestrator-step-section');
+    const activeStepTitle = document.getElementById('active-step-title');
+    const activeStepRisk = document.getElementById('active-step-risk');
+    const activeStepWhat = document.getElementById('active-step-what');
+    const activeStepWhy = document.getElementById('active-step-why');
+    const activeStepCmd = document.getElementById('active-step-cmd');
+    const activeStepImpact = document.getElementById('active-step-impact');
+    const activeStepVerif = document.getElementById('active-step-verif');
+    const approveStepBtn = document.getElementById('approve-step-btn');
+    const rejectStepBtn = document.getElementById('reject-step-btn');
+    const skipStepBtn = document.getElementById('skip-step-btn');
+    const orchestratorConsoleSection = document.getElementById('orchestrator-console-section');
+    const orchestratorConsole = document.getElementById('orchestrator-console');
+    const orchestratorRecoverySection = document.getElementById('orchestrator-recovery-section');
+    const orchestratorRecoveryError = document.getElementById('orchestrator-recovery-error');
+    const retryStepBtn = document.getElementById('retry-step-btn');
+    const applyRecoveryBtn = document.getElementById('apply-recovery-btn');
+    const orchestratorCompletedSection = document.getElementById('orchestrator-completed-section');
+    const orchestratorCompletedList = document.getElementById('orchestrator-completed-list');
+    const orchestratorReadinessSection = document.getElementById('orchestrator-readiness-section');
+    const readinessVerdictTitle = document.getElementById('readiness-verdict-title');
+    const readinessSummary = document.getElementById('readiness-summary');
+    const readinessDetails = document.getElementById('readiness-details');
+    const startOrchestratorBtn = document.getElementById('start-orchestrator-btn');
+
     let currentDestPath = '';
     let currentInspection = null;
     let isLogVisible = false;
@@ -1434,6 +1634,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       progressCard.classList.remove('active');
       promptCard.classList.remove('active');
       inspectionCard.classList.remove('active');
+      setupOrchestratorCard.style.display = 'none';
       fixPreviewCard.style.display = 'none';
       reverificationCard.style.display = 'none';
       prCard.style.display = 'none';
@@ -1576,6 +1777,125 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         head: currentPrDetails.headBranch,
       });
     });
+
+    startOrchestratorBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'startSetupOrchestration' });
+    });
+
+    approveStepBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'approveSetupStep' });
+    });
+
+    rejectStepBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'rejectSetupStep' });
+    });
+
+    skipStepBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'skipSetupStep' });
+    });
+
+    retryStepBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'retrySetupStep' });
+    });
+
+    applyRecoveryBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'applyRecoveryStep' });
+    });
+
+    function renderOrchestratorSnapshot(snapshot) {
+      setupOrchestratorCard.style.display = 'block';
+      orchestratorStateBadge.textContent = snapshot.state.replace(/_/g, ' ');
+
+      // 1. Render Prerequisites
+      if (snapshot.prerequisites && snapshot.prerequisites.length > 0) {
+        let html = '<table class="prereq-table"><thead><tr><th>Tool</th><th>Required</th><th>Installed</th><th>Status</th></tr></thead><tbody>';
+        snapshot.prerequisites.forEach(p => {
+          let badgeClass = 'badge-missing';
+          if (p.status === 'satisfied') badgeClass = 'badge-satisfied';
+          else if (p.status === 'incompatible') badgeClass = 'badge-incompatible';
+
+          html += '<tr><td><strong>' + escapeHtml(p.name) + '</strong></td>' +
+                  '<td>' + escapeHtml(p.requiredVersion || 'any') + '</td>' +
+                  '<td>' + escapeHtml(p.installedVersion || 'none') + '</td>' +
+                  '<td><span class="' + badgeClass + '">' + p.status.toUpperCase() + '</span></td></tr>';
+          if (p.remediationRecommendation && p.status !== 'satisfied') {
+            html += '<tr><td colspan="4" style="color:var(--vscode-descriptionForeground);font-size:10px;">Remediation: ' + escapeHtml(p.remediationRecommendation) + '</td></tr>';
+          }
+        });
+        html += '</tbody></table>';
+        orchestratorPrereqList.innerHTML = html;
+      }
+
+      // 2. Active Step (when awaiting approval or running)
+      if (snapshot.currentStep && (snapshot.state === 'awaiting_approval' || snapshot.state === 'executing_step' || snapshot.state === 'installing_dependencies')) {
+        const s = snapshot.currentStep;
+        orchestratorStepSection.style.display = 'block';
+        activeStepTitle.textContent = s.title;
+        activeStepRisk.textContent = s.riskLevel.toUpperCase() + ' RISK';
+        activeStepRisk.className = 'tag ' + (s.riskLevel === 'high' ? 'warn' : 'ok');
+        activeStepWhat.textContent = s.whatItDoes;
+        activeStepWhy.textContent = s.whyItIsNeeded;
+        activeStepCmd.textContent = (s.executable + ' ' + (s.args || []).join(' ')).trim();
+        activeStepImpact.textContent = 'Impact: ' + s.expectedImpact;
+        activeStepVerif.textContent = 'Verification: ' + s.verificationMethod;
+
+        approveStepBtn.disabled = snapshot.isBusy;
+        rejectStepBtn.disabled = snapshot.isBusy;
+        skipStepBtn.disabled = snapshot.isBusy;
+        skipStepBtn.style.display = s.isRequired ? 'none' : 'inline-block';
+      } else {
+        orchestratorStepSection.style.display = 'none';
+      }
+
+      // 3. Recovery card (when recovering from failure)
+      if (snapshot.state === 'recovering_from_failure' && snapshot.currentStep) {
+        orchestratorRecoverySection.style.display = 'block';
+        orchestratorRecoveryError.textContent = snapshot.currentStep.errorDetails || 'Step execution returned non-zero exit code.';
+        if (snapshot.currentStep.suggestedRecovery) {
+          applyRecoveryBtn.style.display = 'inline-block';
+          applyRecoveryBtn.textContent = 'Apply: ' + snapshot.currentStep.suggestedRecovery.title;
+        } else {
+          applyRecoveryBtn.style.display = 'none';
+        }
+      } else {
+        orchestratorRecoverySection.style.display = 'none';
+      }
+
+      // 4. Completed Steps
+      const completed = (snapshot.steps || []).filter(s => s.status === 'completed');
+      if (completed.length > 0) {
+        orchestratorCompletedSection.style.display = 'block';
+        let compHtml = '';
+        completed.forEach(c => {
+          compHtml += '<div>✓ <strong>' + escapeHtml(c.title) + '</strong> (' + (c.durationMs || 0) + 'ms, exit ' + (c.exitCode !== null ? c.exitCode : 0) + ')</div>';
+        });
+        orchestratorCompletedList.innerHTML = compHtml;
+      }
+
+      // 5. Readiness Report
+      if (snapshot.readinessReport) {
+        const r = snapshot.readinessReport;
+        orchestratorReadinessSection.style.display = 'block';
+        readinessVerdictTitle.textContent = 'Verdict: ' + r.verdict.toUpperCase().replace(/_/g, ' ');
+        readinessVerdictTitle.style.color = r.verdict === 'ready' ? '#4ec9b0' : (r.verdict === 'ready_with_limitations' ? '#cca700' : '#f85149');
+        readinessSummary.textContent = r.summary;
+
+        let detHtml = '';
+        if (r.workingCapabilities && r.workingCapabilities.length > 0) {
+          detHtml += '<div style="margin-top:4px;color:#4ec9b0;"><strong>Verified Working:</strong><ul>';
+          r.workingCapabilities.forEach(c => { detHtml += '<li>' + escapeHtml(c) + '</li>'; });
+          detHtml += '</ul></div>';
+        }
+        if (r.limitations && r.limitations.length > 0) {
+          detHtml += '<div style="margin-top:4px;color:#cca700;"><strong>Known Limitations:</strong><ul>';
+          r.limitations.forEach(l => { detHtml += '<li>' + escapeHtml(l) + '</li>'; });
+          detHtml += '</ul></div>';
+        }
+        readinessDetails.innerHTML = detHtml;
+      } else {
+        orchestratorReadinessSection.style.display = 'none';
+      }
+    }
 
     function renderInspection(banner, destPath, insp) {
       currentDestPath = destPath;
@@ -1858,6 +2178,19 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
           } else {
             ghCliStatusMsg.textContent = 'GitHub CLI notice: ' + (msg.result.error || 'Could not create PR automatically.');
           }
+          break;
+        }
+
+        case 'orchestratorUpdate': {
+          setBusy(msg.snapshot.isBusy);
+          renderOrchestratorSnapshot(msg.snapshot);
+          break;
+        }
+
+        case 'orchestratorStream': {
+          orchestratorConsoleSection.style.display = 'block';
+          orchestratorConsole.textContent = (orchestratorConsole.textContent || '') + (msg.chunk || '');
+          orchestratorConsole.scrollTop = orchestratorConsole.scrollHeight;
           break;
         }
 

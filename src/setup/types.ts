@@ -15,7 +15,7 @@ export interface DetectedRuntime {
 }
 
 export interface DetectedPackageManager {
-  name: 'pnpm' | 'npm' | 'yarn' | 'bun' | 'pip' | 'poetry' | 'cargo';
+  name: 'pnpm' | 'npm' | 'yarn' | 'bun' | 'pip' | 'poetry' | 'cargo' | 'bundler';
   versionHint?: string;
   evidenceFile: string;
 }
@@ -90,3 +90,77 @@ export interface SetupExecutionSession {
   activeStepId?: string;
   isComplete: boolean;
 }
+
+export type PrerequisiteStatus = 'satisfied' | 'missing' | 'incompatible' | 'misconfigured';
+
+export interface PrerequisiteEvaluation {
+  name: string;
+  type: 'runtime' | 'packageManager' | 'database' | 'service' | 'config';
+  requiredVersion?: string;
+  installedVersion?: string;
+  status: PrerequisiteStatus;
+  isRequired: boolean;
+  checkExecutable: string;
+  checkArgs: string[];
+  remediationRecommendation?: string;
+  verificationMethod: string;
+  details?: string;
+}
+
+export type OrchestratorState =
+  | 'idle'
+  | 'inspecting_repository'
+  | 'checking_prerequisites'
+  | 'planning_setup'
+  | 'awaiting_approval'
+  | 'executing_step'
+  | 'verifying_installation'
+  | 'installing_dependencies'
+  | 'running_checks'
+  | 'recovering_from_failure'
+  | 'ready'
+  | 'ready_with_limitations'
+  | 'blocked';
+
+export interface OrchestratedStep {
+  id: string;
+  title: string;
+  stage: 'prerequisite' | 'dependency' | 'configuration' | 'verification' | 'recovery';
+  whatItDoes: string;
+  whyItIsNeeded: string;
+  executable: string;
+  args: string[];
+  cwd: string;
+  riskLevel: StepRiskLevel;
+  expectedImpact: string;
+  verificationMethod: string;
+  isRequired: boolean;
+  status: 'pending' | 'awaiting_approval' | 'running' | 'completed' | 'failed' | 'skipped' | 'rejected';
+  exitCode?: number | null;
+  stdout?: string;
+  stderr?: string;
+  durationMs?: number;
+  errorDetails?: string;
+  suggestedRecovery?: OrchestratedStep;
+}
+
+export interface SetupReadinessReport {
+  verdict: 'ready' | 'ready_with_limitations' | 'blocked';
+  summary: string;
+  prerequisites: PrerequisiteEvaluation[];
+  completedSteps: OrchestratedStep[];
+  blockedReason?: string;
+  limitations: string[];
+  workingCapabilities: string[];
+}
+
+export interface OrchestratorSnapshot {
+  state: OrchestratorState;
+  prerequisites: PrerequisiteEvaluation[];
+  steps: OrchestratedStep[];
+  currentStepIndex: number;
+  currentStep?: OrchestratedStep;
+  readinessReport?: SetupReadinessReport;
+  isBusy: boolean;
+}
+

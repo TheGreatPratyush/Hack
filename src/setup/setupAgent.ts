@@ -192,7 +192,8 @@ export function validateStepForExecution(repoRoot: string, step: SetupStep): Ste
 
   const isInstallCmd =
     (['npm', 'pnpm', 'yarn', 'bun'].includes(baseExec) && args.some(a => ['install', 'i', 'add', 'ci'].includes(a))) ||
-    (['pip', 'pip3', 'poetry'].includes(baseExec) && args.some(a => ['install', 'add'].includes(a)));
+    (['pip', 'pip3', 'poetry'].includes(baseExec) && args.some(a => ['install', 'add'].includes(a))) ||
+    (baseExec === 'bundle' && args.some(a => ['install', 'update'].includes(a)));
 
   const isBuildAutomation = ['make', 'cmake', 'ninja'].includes(baseExec);
 
