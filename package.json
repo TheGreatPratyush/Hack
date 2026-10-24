@@ -1,0 +1,52 @@
+{
+  "name": "firstpr",
+  "displayName": "FirstPR",
+  "description": "Guided, local-first open-source repository onboarding and diagnostics.",
+  "version": "0.1.0",
+  "publisher": "firstpr",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "firstpr-container",
+          "title": "FirstPR",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "firstpr-container": [
+        {
+          "type": "webview",
+          "id": "firstpr.sidebarView",
+          "name": "FirstPR Onboarding"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "firstpr.focus",
+        "title": "FirstPR: Open Sidebar"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "node --test out/test/**/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.5"
+  }
+}
