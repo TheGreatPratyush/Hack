@@ -16,6 +16,16 @@ import {
   ProposedFix,
   FixRollbackRecord,
 } from '../fixes/fixEngine';
+import {
+  preflightTargetRepo,
+  createAndCheckoutBranch,
+  commitVerifiedFix,
+  generatePullRequestDetails,
+  checkGhCli,
+  createPullRequestWithGh,
+  buildBranchName,
+  PullRequestDetails,
+} from '../git/prService';
 
 export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'firstpr.sidebarView';
@@ -23,15 +33,26 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   private _isBusy = false;
   private _abortController: AbortController | null = null;
   private _activeDestPath: string | null = null;
+  private _lastRepoUrl: string = '';
   private _lastInspection: ProjectInspection | null = null;
   private _lastDiagnosticReport: DiagnosticReport | null = null;
   private _activeProposedFix: ProposedFix | null = null;
   private _lastRollbackRecord: FixRollbackRecord | null = null;
   private _lastCheckType: 'test' | 'build' | 'lint' | 'typecheck' = 'test';
   private _lastScriptName?: string;
+  private _currentPrDetails: PullRequestDetails | null = null;
+  private _activeBranchName: string = '';
 
   public get activeDestPath(): string | null {
     return this._activeDestPath;
+  }
+
+  public get currentPrDetails(): PullRequestDetails | null {
+    return this._currentPrDetails;
+  }
+
+  public get activeBranchName(): string {
+    return this._activeBranchName;
   }
 
   public get currentView(): vscode.WebviewView | undefined {
@@ -96,6 +117,21 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         case 'rollbackFix':
           await this._handleRollbackFix();
           break;
+        case 'preparePullRequest':
+          await this._handlePreparePullRequest();
+          break;
+        case 'createBranchAndStage':
+          await this._handleCreateBranchAndStage(message.branchName);
+          break;
+        case 'commitVerifiedFix':
+          await this._handleCommitVerifiedFix(message.title, message.body);
+          break;
+        case 'createGhPr':
+          await this._handleCreateGhPr(message.title, message.body, message.base, message.head);
+          break;
+        case 'openExternalUrl':
+          await this._handleOpenExternalUrl(message.url);
+          break;
         case 'clear':
           this._handleReset();
           break;
@@ -104,6 +140,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private async _handleStartWorkflow(rawUrl: string): Promise<void> {
+    this._lastRepoUrl = (rawUrl || '').trim();
     if (this._isBusy) {
       this._postToWebview({
         command: 'error',
@@ -481,6 +518,181 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
 
     // Re-run check to return to baseline state
     await this._handleRunCheck(this._lastCheckType, this._lastScriptName);
+  }
+
+  private async _handlePreparePullRequest(): Promise<void> {
+    if (!this._activeDestPath || !this._activeProposedFix) {
+      this._postToWebview({
+        command: 'error',
+        message: 'No active repository destination or verified fix available.',
+      });
+      return;
+    }
+
+    const preflight = await preflightTargetRepo(this._activeDestPath, [
+      this._activeProposedFix.relativeFilePath,
+    ]);
+
+    const ghCli = await checkGhCli();
+
+    const branchSlug = this._activeProposedFix.title;
+    const proposedBranchName = buildBranchName(branchSlug);
+
+    const baseBranch = preflight.currentBranch || 'main';
+    const issueTitle = this._lastDiagnosticReport?.issues[0]?.title || this._activeProposedFix.title;
+    const checkCommand = `npm run ${this._lastScriptName || this._lastCheckType}`;
+
+    const prDetails = generatePullRequestDetails({
+      repoUrl: this._lastRepoUrl || 'https://github.com/repository',
+      baseBranch,
+      featureBranch: proposedBranchName,
+      issueTitle,
+      fixTitle: this._activeProposedFix.title,
+      checkCommand,
+      relativeFilePath: this._activeProposedFix.relativeFilePath,
+    });
+
+    this._currentPrDetails = prDetails;
+
+    this._postToWebview({
+      command: 'prWorkflowReady',
+      preflight,
+      ghCli,
+      proposedBranchName,
+      prDetails,
+      targetFile: this._activeProposedFix.relativeFilePath,
+    });
+  }
+
+  private async _handleCreateBranchAndStage(branchName: string): Promise<void> {
+    if (!this._activeDestPath || !this._activeProposedFix) {
+      this._postToWebview({ command: 'error', message: 'No active repository destination.' });
+      return;
+    }
+
+    const branchRes = await createAndCheckoutBranch(this._activeDestPath, branchName);
+    if (!branchRes.success) {
+      this._postToWebview({
+        command: 'error',
+        message: branchRes.error || `Failed to create branch "${branchName}".`,
+      });
+      return;
+    }
+
+    this._activeBranchName = branchName;
+
+    const preflight = await preflightTargetRepo(this._activeDestPath, [
+      this._activeProposedFix.relativeFilePath,
+    ]);
+
+    const issueTitle = this._lastDiagnosticReport?.issues[0]?.title || this._activeProposedFix.title;
+    const checkCommand = `npm run ${this._lastScriptName || this._lastCheckType}`;
+
+    const prDetails = generatePullRequestDetails({
+      repoUrl: this._lastRepoUrl || 'https://github.com/repository',
+      baseBranch: branchRes.previousBranch || 'main',
+      featureBranch: branchName,
+      issueTitle,
+      fixTitle: this._activeProposedFix.title,
+      checkCommand,
+      relativeFilePath: this._activeProposedFix.relativeFilePath,
+    });
+    this._currentPrDetails = prDetails;
+
+    this._postToWebview({
+      command: 'branchCreatedAndStaged',
+      branchRes,
+      preflight,
+      prDetails,
+      targetFile: this._activeProposedFix.relativeFilePath,
+    });
+  }
+
+  private async _handleCommitVerifiedFix(title: string, body: string): Promise<void> {
+    if (!this._activeDestPath || !this._activeProposedFix) {
+      this._postToWebview({ command: 'error', message: 'No active repository destination.' });
+      return;
+    }
+
+    const commitRes = await commitVerifiedFix(
+      this._activeDestPath,
+      [this._activeProposedFix.relativeFilePath],
+      { title, body }
+    );
+
+    if (!commitRes.success) {
+      this._postToWebview({
+        command: 'error',
+        message: commitRes.error || 'Failed to create commit in target repository.',
+      });
+      return;
+    }
+
+    const issueTitle = this._lastDiagnosticReport?.issues[0]?.title || this._activeProposedFix.title;
+    const checkCommand = `npm run ${this._lastScriptName || this._lastCheckType}`;
+
+    const prDetails = generatePullRequestDetails({
+      repoUrl: this._lastRepoUrl || 'https://github.com/repository',
+      baseBranch: 'main',
+      featureBranch: this._activeBranchName || commitRes.branch || 'firstpr/fix',
+      issueTitle,
+      fixTitle: this._activeProposedFix.title,
+      checkCommand,
+      relativeFilePath: this._activeProposedFix.relativeFilePath,
+      commitHash: commitRes.commitHash,
+    });
+    this._currentPrDetails = prDetails;
+
+    const ghCli = await checkGhCli();
+
+    this._postToWebview({
+      command: 'commitSuccess',
+      commitRes,
+      prDetails,
+      ghCli,
+    });
+  }
+
+  private async _handleCreateGhPr(
+    title: string,
+    body: string,
+    base: string,
+    head: string
+  ): Promise<void> {
+    if (!this._activeDestPath) {
+      this._postToWebview({ command: 'error', message: 'No active repository destination.' });
+      return;
+    }
+
+    this._postToWebview({
+      command: 'stageUpdate',
+      stage: 'creating_pr',
+      detail: 'Creating pull request with GitHub CLI (gh)...',
+    });
+
+    const res = await createPullRequestWithGh({
+      cwd: this._activeDestPath,
+      title,
+      body,
+      base: base || 'main',
+      head: head || this._activeBranchName,
+    });
+
+    this._postToWebview({
+      command: 'ghPrCreated',
+      result: res,
+    });
+  }
+
+  private async _handleOpenExternalUrl(rawUrl: string): Promise<void> {
+    try {
+      if (rawUrl) {
+        await vscode.env.openExternal(vscode.Uri.parse(rawUrl));
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      vscode.window.showErrorMessage(`Failed to open URL: ${msg}`);
+    }
   }
 
   private _handleCancelActiveOperation(): void {
@@ -963,7 +1175,60 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     <div class="stage-title" id="reverif-title">Verification Outcome</div>
     <div id="reverif-message" class="stage-detail"></div>
     <div class="btn-group" style="margin-top:8px;">
-      <button id="rollback-btn" class="secondary-btn">Rollback Patch</button>
+      <button id="prep-pr-btn" class="primary-btn" style="flex:2;display:none;">Prepare Pull Request</button>
+      <button id="rollback-btn" class="secondary-btn" style="flex:1;">Rollback Patch</button>
+    </div>
+  </div>
+
+  <!-- Pull Request Preparation Card -->
+  <div id="pr-card" class="card info" style="display:none;">
+    <div class="stage-title" style="color:var(--vscode-inputValidation-infoBorder, #007acc);">
+      Pull Request Preparation
+    </div>
+    <div id="pr-preflight-info" class="notice-box" style="margin-top:6px;font-size:11px;"></div>
+
+    <div class="section-subtitle" style="margin-top:8px;">1. Target Feature Branch</div>
+    <div style="font-size:11px;color:var(--vscode-descriptionForeground);margin-bottom:4px;">
+      Create isolated branch in target repository:
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:8px;">
+      <input type="text" id="pr-branch-input" style="flex:1;padding:5px 8px;font-size:12px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:3px;" spellcheck="false" />
+      <button id="create-branch-btn" class="primary-btn" style="white-space:nowrap;">Create Branch</button>
+    </div>
+    <div id="pr-branch-status" style="font-size:11px;margin-bottom:8px;"></div>
+
+    <div id="pr-commit-section" style="display:none;">
+      <div class="section-subtitle">2. Verified Commit</div>
+      <div style="font-size:11px;color:var(--vscode-descriptionForeground);margin-bottom:6px;">
+        Staging approved fix file: <code id="pr-staged-file" style="color:var(--vscode-textPreformat-foreground);"></code>
+      </div>
+      <div style="margin-bottom:6px;">
+        <label style="font-size:11px;font-weight:600;display:block;margin-bottom:2px;">Commit Title</label>
+        <input type="text" id="pr-commit-title" style="width:100%;padding:5px 8px;font-size:12px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:3px;" spellcheck="false" />
+      </div>
+      <div style="margin-bottom:8px;">
+        <label style="font-size:11px;font-weight:600;display:block;margin-bottom:2px;">Commit Message Body</label>
+        <textarea id="pr-commit-body" rows="4" style="width:100%;padding:5px 8px;font-size:11px;font-family:monospace;resize:vertical;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:3px;"></textarea>
+      </div>
+      <button id="commit-btn" class="success-btn" style="width:100%;margin-bottom:10px;">Commit Verified Changes</button>
+    </div>
+
+    <div id="pr-ready-section" style="display:none;">
+      <div class="section-subtitle" style="color:var(--vscode-testing-iconPassed, #4ec9b0);">
+        ✓ Fix Committed Locally
+      </div>
+      <div id="pr-commit-hash-pill" class="path-pill" style="margin-bottom:8px;"></div>
+
+      <div class="btn-group" style="flex-direction:column;gap:6px;">
+        <button id="open-compare-url-btn" class="primary-btn" style="width:100%;">
+          Open Pull Request on GitHub
+        </button>
+        <button id="create-gh-cli-btn" class="secondary-btn" style="width:100%;display:none;">
+          Create PR via GitHub CLI (gh)
+        </button>
+      </div>
+
+      <div id="gh-cli-status-msg" style="font-size:11px;margin-top:6px;color:var(--vscode-descriptionForeground);"></div>
     </div>
   </div>
 
@@ -1027,7 +1292,27 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     const reverificationCard = document.getElementById('reverification-card');
     const reverifTitle = document.getElementById('reverif-title');
     const reverifMessage = document.getElementById('reverif-message');
+    const prepPrBtn = document.getElementById('prep-pr-btn');
     const rollbackBtn = document.getElementById('rollback-btn');
+
+    const prCard = document.getElementById('pr-card');
+    const prPreflightInfo = document.getElementById('pr-preflight-info');
+    const prBranchInput = document.getElementById('pr-branch-input');
+    const createBranchBtn = document.getElementById('create-branch-btn');
+    const prBranchStatus = document.getElementById('pr-branch-status');
+    const prCommitSection = document.getElementById('pr-commit-section');
+    const prStagedFile = document.getElementById('pr-staged-file');
+    const prCommitTitle = document.getElementById('pr-commit-title');
+    const prCommitBody = document.getElementById('pr-commit-body');
+    const commitBtn = document.getElementById('commit-btn');
+    const prReadySection = document.getElementById('pr-ready-section');
+    const prCommitHashPill = document.getElementById('pr-commit-hash-pill');
+    const openCompareUrlBtn = document.getElementById('open-compare-url-btn');
+    const createGhCliBtn = document.getElementById('create-gh-cli-btn');
+    const ghCliStatusMsg = document.getElementById('gh-cli-status-msg');
+
+    let currentCompareUrl = '';
+    let currentPrDetails = null;
 
     const diagnosticsCard = document.getElementById('diagnostics-card');
     const diagnosticsHeader = document.getElementById('diagnostics-header');
@@ -1050,6 +1335,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       inspectionCard.classList.remove('active');
       fixPreviewCard.style.display = 'none';
       reverificationCard.style.display = 'none';
+      prCard.style.display = 'none';
       diagnosticsCard.style.display = 'none';
       errorCard.classList.remove('active');
     }
@@ -1145,6 +1431,49 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
 
     rollbackBtn.addEventListener('click', () => {
       vscode.postMessage({ command: 'rollbackFix' });
+    });
+
+    prepPrBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'preparePullRequest' });
+    });
+
+    createBranchBtn.addEventListener('click', () => {
+      const branch = (prBranchInput.value || '').trim();
+      if (!branch) {
+        prBranchStatus.textContent = 'Please enter a valid branch name.';
+        prBranchStatus.style.color = 'var(--vscode-inputValidation-errorBorder)';
+        return;
+      }
+      prBranchStatus.textContent = 'Creating branch and verifying repository state...';
+      prBranchStatus.style.color = 'var(--vscode-descriptionForeground)';
+      vscode.postMessage({ command: 'createBranchAndStage', branchName: branch });
+    });
+
+    commitBtn.addEventListener('click', () => {
+      const title = (prCommitTitle.value || '').trim();
+      const body = (prCommitBody.value || '').trim();
+      if (!title) {
+        alert('Please enter a commit title.');
+        return;
+      }
+      vscode.postMessage({ command: 'commitVerifiedFix', title, body });
+    });
+
+    openCompareUrlBtn.addEventListener('click', () => {
+      if (currentCompareUrl) {
+        vscode.postMessage({ command: 'openExternalUrl', url: currentCompareUrl });
+      }
+    });
+
+    createGhCliBtn.addEventListener('click', () => {
+      if (!currentPrDetails) return;
+      vscode.postMessage({
+        command: 'createGhPr',
+        title: (prCommitTitle.value || '').trim(),
+        body: (prCommitBody.value || '').trim(),
+        base: currentPrDetails.baseBranch,
+        head: currentPrDetails.headBranch,
+      });
     });
 
     function renderInspection(banner, destPath, insp) {
@@ -1359,10 +1688,74 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
           reverifMessage.textContent = isPassed
             ? 'Applied patch "' + escapeHtml(msg.appliedFixTitle || '') + '" resolved the issue! All checks exited with code 0.'
             : 'Check failed again with exit code ' + msg.recheckResult.exitCode + '. You can rollback below.';
+          prepPrBtn.style.display = isPassed ? 'block' : 'none';
           reverificationCard.style.display = 'block';
 
           if (msg.recheckDiagnosis && msg.recheckResult) {
             renderDiagnosticReport(msg.recheckDiagnosis, msg.recheckResult);
+          }
+          break;
+        }
+
+        case 'prWorkflowReady': {
+          prCard.style.display = 'block';
+          prCommitSection.style.display = 'none';
+          prReadySection.style.display = 'none';
+
+          if (msg.preflight.hasUnrelatedChanges) {
+            prPreflightInfo.innerHTML =
+              '<span style="color:var(--vscode-inputValidation-warningBorder, #cca700);">⚠️ Warning:</span> Target repository has unrelated uncommitted changes (' +
+              escapeHtml(msg.preflight.unrelatedFiles.join(', ')) + '). FirstPR will <strong>strictly stage only</strong> the verified fix file (' +
+              escapeHtml(msg.targetFile) + ') to protect your work.';
+          } else {
+            prPreflightInfo.innerHTML =
+              '<span style="color:var(--vscode-testing-iconPassed, #4ec9b0);">✓ Clean repository state.</span> Current branch: <strong>' +
+              escapeHtml(msg.preflight.currentBranch || 'HEAD') + '</strong>.';
+          }
+
+          prBranchInput.value = msg.proposedBranchName;
+          prBranchStatus.textContent = '';
+          prStagedFile.textContent = msg.targetFile;
+          prCommitTitle.value = msg.prDetails.title;
+          prCommitBody.value = msg.prDetails.body;
+          currentPrDetails = msg.prDetails;
+          currentCompareUrl = msg.prDetails.compareUrl;
+          break;
+        }
+
+        case 'branchCreatedAndStaged': {
+          prBranchStatus.textContent = '✓ Active branch: ' + msg.branchRes.branchName;
+          prBranchStatus.style.color = 'var(--vscode-testing-iconPassed, #4ec9b0)';
+          prCommitSection.style.display = 'block';
+          prCommitTitle.value = msg.prDetails.title;
+          prCommitBody.value = msg.prDetails.body;
+          currentPrDetails = msg.prDetails;
+          currentCompareUrl = msg.prDetails.compareUrl;
+          break;
+        }
+
+        case 'commitSuccess': {
+          prCommitSection.style.display = 'none';
+          prReadySection.style.display = 'block';
+          prCommitHashPill.textContent = 'Commit: ' + (msg.commitRes.shortHash || msg.commitRes.commitHash || 'HEAD') + ' on ' + (msg.commitRes.branch || '');
+          currentCompareUrl = msg.prDetails.compareUrl;
+          currentPrDetails = msg.prDetails;
+
+          if (msg.ghCli && msg.ghCli.authenticated) {
+            createGhCliBtn.style.display = 'block';
+            ghCliStatusMsg.textContent = 'GitHub CLI detected and authenticated' + (msg.ghCli.account ? ' (' + msg.ghCli.account + ')' : '') + '.';
+          } else {
+            createGhCliBtn.style.display = 'none';
+            ghCliStatusMsg.textContent = 'GitHub Compare link ready for one-click browser submission.';
+          }
+          break;
+        }
+
+        case 'ghPrCreated': {
+          if (msg.result.success) {
+            ghCliStatusMsg.innerHTML = '<span style="color:var(--vscode-testing-iconPassed, #4ec9b0);">✓ Pull Request created:</span> <a href="' + escapeHtml(msg.result.url) + '" style="color:var(--vscode-textLink-foreground);">' + escapeHtml(msg.result.url) + '</a>';
+          } else {
+            ghCliStatusMsg.textContent = 'GitHub CLI notice: ' + (msg.result.error || 'Could not create PR automatically.');
           }
           break;
         }

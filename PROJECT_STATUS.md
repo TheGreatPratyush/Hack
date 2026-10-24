@@ -77,19 +77,42 @@
   - `src/test/endToEndFixPipeline.test.ts` (created)
   - `src/ui/SidebarProvider.ts` (updated)
   - `PROJECT_STATUS.md` (updated)
+- **Commit:** `050eb6df977a59b5c7fe87b86512d94462737aca` pushed to `origin/main`.
+
+### Milestone 5: Safe Git Branch & Pull Request Preparation
+- **Status:** `COMPLETE`
+- **Deliverables:**
+  - **Git PR Service (`src/git/prService.ts`):**
+    - Target repository preflight inspector (`preflightTargetRepo`): checks worktree validity, detects detached HEAD, detects pre-existing unrelated changes, prevents accidental sweeps.
+    - Safe branch name generator & validator (`sanitizeBranchSlug`, `isValidBranchName`, `buildBranchName`): enforces safe git-ref patterns (`firstpr/fix-<slug>`).
+    - Dedicated branch switcher (`createAndCheckoutBranch`): creates and checks out feature branch safely without losing uncommitted user changes.
+    - Isolated commit engine (`commitVerifiedFix`): stages strictly the approved fix files (`git add -- <file>`), verifies `git diff --cached` contains no unapproved files, prevents path traversal, captures git author errors gracefully.
+    - Pull Request generator (`generatePullRequestDetails`): builds standard PR title and structured markdown body citing evidence and local verification status; constructs direct GitHub Compare URL (`/compare/base...feature?expand=1&title=...&body=...`).
+    - GitHub CLI integration (`checkGhCli`, `createPullRequestWithGh`): checks `gh` CLI installation and auth state, supports optional direct PR creation from within VS Code.
+  - **Sidebar UI Integration (`src/ui/SidebarProvider.ts`):**
+    - "Prepare Pull Request" workflow triggered after successful check re-verification.
+    - Branch Preparation UI: proposed branch name with preflight repository health indicator.
+    - Commit Review UI: displays staged file, editable commit title, and structured verification commit message body.
+    - PR Submission Card: primary one-click "Open Pull Request on GitHub" button opening browser Compare link, plus optional "Create PR via GitHub CLI" button.
+  - **Automated Tests:**
+    - `src/test/prService.test.ts` (14 unit tests covering slug sanitization, ref validation, repo parsing, compare URL generation, preflight checks, dirty repo protection, branch creation, isolated commit, traversal prevention, gh CLI detection).
+    - `src/test/endToEndPrPipeline.test.ts` (full integration test covering inspection $\to$ failure capture $\to$ diagnosis $\to$ fix $\to$ re-verification $\to$ branch creation $\to$ isolated staging $\to$ commit $\to$ PR compare URL).
+    - Total test suite: 76 tests across 15 suites (100% passing).
+- **Files Created/Modified:**
+  - `src/git/prService.ts` (created)
+  - `src/test/prService.test.ts` (created)
+  - `src/test/endToEndPrPipeline.test.ts` (created)
+  - `src/ui/SidebarProvider.ts` (updated)
+  - `PROJECT_STATUS.md` (updated)
 - **Commands Executed & Results:**
   - `npm run compile`: Compiled TypeScript cleanly (`tsc -p ./`) with code 0.
-  - `npm test`: Ran 61 unit/integration tests across 9 suites. Result: 61 passed, 0 failed in 1.30s.
+  - `npm test`: Ran 76 unit/integration tests across 15 suites. Result: 76 passed, 0 failed in 1.33s.
   - `npx @vscode/vsce ls`: Verified packaging manifest integrity. Exited with code 0.
-- **Known Issues & Remaining Work:**
-  - Automated branch creation (`firstpr/fix-...`), descriptive git commit generation, and pull request preparation are scheduled for Milestone 5.
 
 ---
 
 ## Planned Implementation Milestones
 
-### Milestone 5: Branch & Pull Request Preparation
-- **Goal:** Create dedicated local branch (`firstpr/fix-<issue>`), commit verified changes with descriptive message, provide direct GitHub PR link.
-
 ### Milestone 6: Hardening, Live Demo Polish & Pitch Deck
-- **Goal:** 90-second reproducible demo script and judging FAQ.
+- **Goal:** 90-second reproducible demo script, edge-case hardening, and judging FAQ.
+
