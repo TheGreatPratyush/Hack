@@ -111,8 +111,54 @@
 
 ---
 
-## Planned Implementation Milestones
+## Strategic Roadmap Evolution: Local-LLM Repository Agent
 
-### Milestone 6: Hardening, Live Demo Polish & Pitch Deck
-- **Goal:** 90-second reproducible demo script, edge-case hardening, and judging FAQ.
+Following intermediate hackathon evaluation, FirstPR is adopting a **Local LLM-assisted architecture** for repository analysis, environment setup planning, failure recovery, and diagnostic reasoning, while preserving deterministic execution guardrails and human-in-the-loop approvals.
+
+### Updated Milestone Plan
+
+- **Milestone 6: Architecture and Local Model Selection**
+  - **Status:** `COMPLETE`
+  - Host Hardware Verified: Apple MacBook Pro M4 (10 cores), 16 GB unified RAM, 209 GB free SSD space, macOS 26.6.1.
+  - Local Tooling Audited: Ollama 0.33.2 detected at `/usr/local/bin/ollama`, daemon running on `http://127.0.0.1:11434`.
+  - Cached Model Detected: `qwen3:8b` (5.2 GB, Q4_K_M).
+  - Target Default Candidate Model: `qwen2.5-coder:7b` selected for code generation and schema adherence.
+  - Strategic 12-milestone roadmap established.
+
+- **Milestone 7: Local LLM Client Integration**
+  - **Status:** `COMPLETE`
+  - **Deliverables:**
+    - **Provider-Independent Types (`src/llm/types.ts`):** Defined `SetupPrerequisite`, `SetupStep`, `FirstPrSetupPlan`, `PlanValidationResult`, `LlmClient`, `LlmGenerateOptions`, `LlmHealthCheckResult`, and typed `LlmError` with error codes (`CONNECTION_REFUSED`, `MODEL_NOT_FOUND`, `TIMEOUT`, `CANCELLED`, `INVALID_RESPONSE`, `VALIDATION_FAILED`, `HTTP_ERROR`, `PAYLOAD_TOO_LARGE`).
+    - **Strict Runtime Schema Validator (`src/llm/planValidator.ts`):** Pure TypeScript schema enforcement validating required fields, unique step IDs, executable + args array separation (forbids raw shell strings and shell metacharacters `;&|<>$`), path traversal prevention in `cwd` (forbids absolute paths, `..`, and home directory expansion), timeout bounds (1–3600s), acyclic fallback graph traversal (detects self-referencing and multi-step circular fallback loops).
+    - **Local Ollama Adapter (`src/llm/ollamaClient.ts`):** Connects to local Ollama runtime via HTTP API (`http://127.0.0.1:11434`). Supports health checks (`/api/tags`), model listing, bounded response size enforcement (512 KB), native `fetch` with `AbortSignal` and timeout propagation, markdown code fence stripping, and schema validation. Zero external cloud dependencies, zero telemetry, zero secrets exfiltration.
+    - **Automated Tests:**
+      - `src/test/llmClient.test.ts`: 27 unit tests covering schema validation, shell metacharacter rejection, directory traversal prevention, cyclic fallback detection, mocked HTTP responses (health check, connection refused, valid plan, markdown stripping, invalid JSON, schema failure, 404 model not found, 500 error, timeout, user cancellation, payload size limits).
+      - Total test suite: 103 tests across 17 suites (100% passing).
+    - **Live On-Device Model Suitability Smoke Test:**
+      - Evaluated on-device cached `qwen3:8b` against local Ollama running on Apple M4.
+      - Generated response in ~22.5s.
+      - Demonstrated critical value of `validateSetupPlan`: caught attempts by the general conversational model to emit `/` for cwd and conflate prerequisite check fields with executable step fields, proving the necessity of `validateSetupPlan` guardrails and confirming `qwen2.5-coder:7b` as the superior coder model candidate.
+      - Preserved safety constraint: zero model-generated commands executed on disk.
+  - **Files Created/Modified:**
+    - `src/llm/types.ts` (created)
+    - `src/llm/planValidator.ts` (created)
+    - `src/llm/ollamaClient.ts` (created)
+    - `src/llm/index.ts` (created)
+    - `src/test/llmClient.test.ts` (created)
+    - `PROJECT_STATUS.md` (updated)
+  - **Verification:**
+    - `npm run compile`: Compiled TypeScript cleanly with code 0.
+    - `npm test`: 103/103 tests passing in 1.39s across 17 suites.
+    - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
+
+- **Milestone 8: Repository Analysis & `setup.md` Generation**
+  - Collect bounded repository context (documentation, manifests, lockfiles, directory structure) and generate structured, actionable `setup.md` runbook with prerequisites, commands, expected outcomes, and recovery paths.
+- **Milestone 9: Safe Setup Execution Agent**
+  - Incrementally execute approved setup steps with strict security boundaries, capture results, compare against expected outcomes, and trigger bounded recovery when steps fail.
+- **Milestone 10: LLM-Assisted Bug Analysis & Verified Fixes**
+  - Ground diagnosis on actual check failures and source context, propose verified fixes for confirmed defects, and maintain rollback protections.
+- **Milestone 11: LLM-Assisted Pull Request Preparation**
+  - Draft evidence-backed commit messages, PR titles, and markdown summaries from verified diffs and test results.
+- **Milestone 12: End-to-End Stress Testing & Final Presentation**
+  - Validate end-to-end workflow on real-world repositories (Kolibri & demo fixture), harden error handling, package extension, and prepare demo and pitch collateral.
 
