@@ -151,8 +151,36 @@ Following intermediate hackathon evaluation, FirstPR is adopting a **Local LLM-a
     - `npm test`: 103/103 tests passing in 1.39s across 17 suites.
     - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
 
-- **Milestone 8: Repository Analysis & `setup.md` Generation**
-  - Collect bounded repository context (documentation, manifests, lockfiles, directory structure) and generate structured, actionable `setup.md` runbook with prerequisites, commands, expected outcomes, and recovery paths.
+- **Milestone 8: Repository Context Extraction & `setup.md` Generation**
+  - **Status:** `COMPLETE`
+  - **Deliverables:**
+    - **Context Extractor (`src/setup/contextExtractor.ts`):**
+      - Bounded evidence gathering across README, CONTRIBUTING, CLAUDE/AGENTS instructions, package manifests (`package.json`, `pnpm-workspace.yaml`, `requirements.txt`, `pyproject.toml`, `Makefile`, etc.), and lockfiles.
+      - Enforces strict size caps: 200 KB max read limit, 15 KB per-file truncate limit, 60 KB total context cap.
+      - Security sanitization: excludes sensitive files (`.env*`, `*token*`, `*secret*`, `*credential*`, `*.pem`, `*.key`, `id_rsa`) and binary media assets.
+      - Prompt injection defense: wraps untrusted repository contents in `<untrusted_repo_file>` tags with explicit anti-injection instructions.
+      - Deterministic heuristics: detects runtimes (`Node.js`, `Python`) with version hints and package managers (`pnpm`, `npm`, `yarn`, `bun`, `pip`, `poetry`) citing specific evidence sources, detecting lockfile conflicts.
+    - **Setup Generator & Runbook Formatter (`src/setup/setupGenerator.ts`):**
+      - Builds compact prompt with extracted evidence, detected facts, and anti-injection instructions.
+      - Integrates with Milestone 7 `LlmClient` and `validateSetupPlan`.
+      - Deterministic failover: `synthesizeFactualBaselinePlan` generates safe factual setup plan if model is unreachable.
+      - Formats human-readable `setup.md` clearly separating verified facts from model recommendations, host prerequisites, ordered setup commands, verification checks, and safety review gate.
+      - Zero command execution during Milestone 8.
+    - **Automated Tests:**
+      - `src/test/setupGenerator.test.ts`: 6 comprehensive scenarios covering pnpm monorepo with Node and Python (Kolibri model), standard npm project, missing and conflicting manifests, prompt injection defense, sensitive/oversized file exclusion, and model failure handling.
+      - Total test suite: 109 tests across 18 suites (100% passing).
+  - **Files Created/Modified:**
+    - `src/setup/types.ts` (created)
+    - `src/setup/contextExtractor.ts` (created)
+    - `src/setup/setupGenerator.ts` (created)
+    - `src/setup/index.ts` (created)
+    - `src/test/setupGenerator.test.ts` (created)
+    - `PROJECT_STATUS.md` (updated)
+  - **Verification:**
+    - `npm run compile`: Compiled TypeScript cleanly with code 0.
+    - `npm test`: 109/109 tests passing in 1.68s across 18 suites.
+    - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
+
 - **Milestone 9: Safe Setup Execution Agent**
   - Incrementally execute approved setup steps with strict security boundaries, capture results, compare against expected outcomes, and trigger bounded recovery when steps fail.
 - **Milestone 10: LLM-Assisted Bug Analysis & Verified Fixes**
