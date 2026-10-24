@@ -45,3 +45,48 @@ export interface SetupGuideResult {
   generatedAt: string;
   isFactualBaselineFallback?: boolean;
 }
+
+export type StepRiskLevel = 'low' | 'medium' | 'high' | 'critical_rejected';
+
+export interface StepPreflightCheck {
+  stepId: string;
+  executable: string;
+  args: string[];
+  resolvedCwd: string;
+  riskLevel: StepRiskLevel;
+  warnings: string[];
+  isAllowed: boolean;
+  rejectionReason?: string;
+}
+
+export type StepExecutionStatus =
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'timed_out'
+  | 'rejected'
+  | 'error';
+
+export interface StepExecutionResult {
+  stepId: string;
+  title: string;
+  executable: string;
+  args: string[];
+  cwd: string;
+  status: StepExecutionStatus;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  explanation: string;
+  suggestedRecoveryStep?: import('../llm').SetupStep;
+  recoveryExplanation?: string;
+}
+
+export interface SetupExecutionSession {
+  repositoryRoot: string;
+  plan: FirstPrSetupPlan;
+  results: Map<string, StepExecutionResult>;
+  activeStepId?: string;
+  isComplete: boolean;
+}

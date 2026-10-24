@@ -26,6 +26,8 @@ import {
   buildBranchName,
   PullRequestDetails,
 } from '../git/prService';
+import { FirstPrSetupPlan, OllamaClient } from '../llm';
+import { SetupExecutionAgent, generateSetupGuide } from '../setup';
 
 export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'firstpr.sidebarView';
@@ -42,6 +44,8 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   private _lastScriptName?: string;
   private _currentPrDetails: PullRequestDetails | null = null;
   private _activeBranchName: string = '';
+  private _activeSetupPlan: FirstPrSetupPlan | null = null;
+  private _activeSetupAgent: SetupExecutionAgent | null = null;
 
   public get activeDestPath(): string | null {
     return this._activeDestPath;
@@ -53,6 +57,14 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
 
   public get activeBranchName(): string {
     return this._activeBranchName;
+  }
+
+  public get activeSetupPlan(): FirstPrSetupPlan | null {
+    return this._activeSetupPlan;
+  }
+
+  public get activeSetupAgent(): SetupExecutionAgent | null {
+    return this._activeSetupAgent;
   }
 
   public get currentView(): vscode.WebviewView | undefined {
@@ -128,6 +140,12 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
           break;
         case 'createGhPr':
           await this._handleCreateGhPr(message.title, message.body, message.base, message.head);
+          break;
+        case 'generateSetupRunbook':
+          await this._handleGenerateSetupRunbook();
+          break;
+        case 'executeSetupStep':
+          await this._handleExecuteSetupStep(message.stepId, Boolean(message.userApproved));
           break;
         case 'openExternalUrl':
           await this._handleOpenExternalUrl(message.url);
@@ -682,6 +700,89 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       command: 'ghPrCreated',
       result: res,
     });
+  }
+
+  private async _handleGenerateSetupRunbook(): Promise<void> {
+    if (!this._activeDestPath) {
+      this._postToWebview({ command: 'error', message: 'No active repository destination.' });
+      return;
+    }
+    if (this._isBusy) {
+      this._postToWebview({ command: 'error', message: 'An operation is currently in progress.' });
+      return;
+    }
+
+    this._isBusy = true;
+    this._postToWebview({
+      command: 'stageUpdate',
+      stage: 'analyzing_repo',
+      detail: 'Extracting repository evidence and generating setup plan...',
+    });
+
+    try {
+      const client = new OllamaClient();
+      const result = await generateSetupGuide(this._activeDestPath, client, {
+        allowFallbackToFactualBaseline: true,
+      });
+
+      this._activeSetupPlan = result.plan;
+      this._activeSetupAgent = new SetupExecutionAgent(this._activeDestPath, result.plan);
+
+      this._isBusy = false;
+      this._postToWebview({
+        command: 'setupPlanReady',
+        plan: result.plan,
+        setupMarkdown: result.setupMarkdown,
+        isFactualFallback: result.isFactualBaselineFallback,
+      });
+    } catch (err: unknown) {
+      this._isBusy = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      this._postToWebview({ command: 'error', message: `Setup runbook generation failed: ${msg}` });
+    }
+  }
+
+  private async _handleExecuteSetupStep(stepId: string, userApproved: boolean): Promise<void> {
+    if (!this._activeSetupAgent) {
+      this._postToWebview({ command: 'error', message: 'No active setup session. Generate a setup plan first.' });
+      return;
+    }
+    if (this._isBusy) {
+      this._postToWebview({ command: 'error', message: 'An operation is currently in progress.' });
+      return;
+    }
+
+    this._isBusy = true;
+    this._abortController = new AbortController();
+
+    this._postToWebview({
+      command: 'stageUpdate',
+      stage: 'executing_setup_step',
+      detail: `Executing step '${stepId}'...`,
+    });
+
+    try {
+      const result = await this._activeSetupAgent.executeStep(stepId, {
+        userApproved,
+        signal: this._abortController.signal,
+        onProgress: (data: string) => {
+          this._postToWebview({ command: 'stepProgress', stepId, chunk: data });
+        },
+      });
+
+      this._isBusy = false;
+      this._abortController = null;
+
+      this._postToWebview({
+        command: 'stepExecutionComplete',
+        result,
+      });
+    } catch (err: unknown) {
+      this._isBusy = false;
+      this._abortController = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      this._postToWebview({ command: 'error', message: `Step execution error: ${msg}` });
+    }
   }
 
   private async _handleOpenExternalUrl(rawUrl: string): Promise<void> {

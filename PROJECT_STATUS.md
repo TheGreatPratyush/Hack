@@ -182,7 +182,38 @@ Following intermediate hackathon evaluation, FirstPR is adopting a **Local LLM-a
     - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
 
 - **Milestone 9: Safe Setup Execution Agent**
-  - Incrementally execute approved setup steps with strict security boundaries, capture results, compare against expected outcomes, and trigger bounded recovery when steps fail.
+  - **Status:** `COMPLETE`
+  - **Deliverables:**
+    - **Preflight Validator (`validateStepForExecution` in `src/setup/setupAgent.ts`):**
+      - Security blacklist: blocks dangerous destructive commands (`rm`, `unlink`, `mkfs`, `dd`, `fdisk`, `shutdown`, `reboot`, `wget`, `curl`, `chmod`, `chown`, `sudo`, `su`, `useradd`, `userdel`, etc.).
+      - Direct interpreter block: blocks shell interpreter execution (`bash`, `sh`, `zsh`) and arbitrary inline code eval (`node -e`, `python -c`).
+      - Shell metacharacter rejection: blocks commands containing `;&|<>$` and newlines.
+      - Canonical realpath verification & symlink escape defense: resolves real canonical directory paths (`fs.realpathSync`) ensuring the working directory strictly resides within the repository root, rejecting path traversal and symlinks pointing outside the repository boundary.
+      - Risk classification: tags commands as `'high'` (package managers downloading network packages or running lifecycle postinstall hooks, makefiles), `'medium'` (builds and test runners), or `'low'` (read-only inspections).
+    - **Execution Agent (`SetupExecutionAgent` in `src/setup/setupAgent.ts`):**
+      - Explicit step-by-step user approval gate: executing a step requires `userApproved: true`. Approval of one step never approves subsequent steps.
+      - Safe process spawning: strictly uses `child_process.spawn` with `shell: false` and array-separated arguments.
+      - Bounded buffer capture: limits stdout and stderr to 100 KB per stream with explicit truncation indicators.
+      - Cancellation and timeout enforcement: supports `AbortSignal` for graceful tree termination (`SIGTERM` $\to$ `SIGKILL`) and configurable per-step deadlines.
+      - Non-zero failure recovery: on command failure, captures exit code and stderr, queries plan for valid `fallbackStepId`, and proposes it as a recovery step (`suggestedRecoveryStep`) with explanation, requiring fresh explicit approval before executing.
+      - Honest verification: marks a step completed only upon process termination with exit code 0.
+    - **VS Code Sidebar Integration (`src/ui/SidebarProvider.ts`):**
+      - Added `_handleGenerateSetupRunbook` and `_handleExecuteSetupStep` handlers with live streaming progress (`stepProgress`), cancellation support, and step completion events.
+    - **Automated Tests:**
+      - `src/test/setupAgent.test.ts`: 10 comprehensive automated scenarios covering approved steps, unapproved/rejected steps, blacklisted/eval executables, directory traversal and symlink escapes, timeouts and cancellation, non-zero exit codes with bounded buffers, high-risk rejection, fallback recovery proposals with fresh approval gating, offline operation with factual baselines, and complete regression preservation.
+      - Total test suite: 119 tests across 19 suites (100% passing).
+  - **Files Created/Modified:**
+    - `src/setup/types.ts` (updated)
+    - `src/setup/setupAgent.ts` (created)
+    - `src/setup/index.ts` (updated)
+    - `src/ui/SidebarProvider.ts` (updated)
+    - `src/test/setupAgent.test.ts` (created)
+    - `PROJECT_STATUS.md` (updated)
+  - **Verification:**
+    - `npm run compile`: Compiled TypeScript cleanly with code 0.
+    - `npm test`: 119/119 tests passing in 2.22s across 19 suites.
+    - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
+
 - **Milestone 10: LLM-Assisted Bug Analysis & Verified Fixes**
   - Ground diagnosis on actual check failures and source context, propose verified fixes for confirmed defects, and maintain rollback protections.
 - **Milestone 11: LLM-Assisted Pull Request Preparation**
