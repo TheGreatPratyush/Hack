@@ -243,7 +243,36 @@ Following intermediate hackathon evaluation, FirstPR is adopting a **Local LLM-a
     - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
 
 - **Milestone 11: LLM-Assisted Pull Request Preparation**
-  - Draft evidence-backed commit messages, PR titles, and markdown summaries from verified diffs and test results.
+  - **Status:** `COMPLETE`
+  - **Deliverables:**
+    - **Factual Evidence Context Extraction (`FactualPrEvidence` in `src/git/prDraftGenerator.ts`):**
+      - Strictly aggregates verified facts: repository URL, base/feature branches, exact modified files from unified diff, issue title, bounded observed failure traces, likely explanation, patch application state, actual verification exit code and command, and explicit rollback status.
+      - Never invents test success: directly connects verification result (`exitCode === 0`) to PR claims.
+    - **Secret Redaction Engine (`redactSensitiveContent`):**
+      - Automatically strips sensitive tokens and credentials before drafting or prompt compilation: GitHub Personal Access Tokens (`ghp_`, `github_pat_`), bearer tokens, Slack tokens, private key blocks (`BEGIN PRIVATE KEY`), and generic secret patterns.
+    - **Safe Git Staging Isolation (`preflightTargetRepo`, `commitVerifiedFix` in `src/git/prService.ts`):**
+      - Enforces that only explicitly approved and verified files are staged (`git add -- <file>`).
+      - Identifies and excludes any unrelated modified files in the working directory, issuing clear UI warnings and never sweeping unreviewed changes into commits.
+      - Guarantees branch switching and commits do not affect or stash unrelated dirty files.
+    - **Anti-Hallucination Schema Validator (`validatePrDraftPayload`):**
+      - Validates commit titles ($\le 100$ chars), commit bodies ($\le 3000$ chars), PR titles ($\le 150$ chars), and PR markdown bodies ($\le 6000$ chars).
+      - Rejects model hallucinations: if verification failed or was not executed, forbids the model from claiming `Verified: Passed` or `exit code 0`, immediately falling back to honest deterministic reporting.
+    - **Deterministic Fallback & GitHub Compare Generator (`generateDeterministicPrDraft`, `buildCompareUrl`):**
+      - When Ollama is offline, unreachable, or returns invalid schemas, deterministic generation produces an honest, grounded PR draft with collapsible unified diff and verification status.
+      - Generates direct GitHub Compare URLs (`/compare/base...feature?expand=1&title=...&body=...`) with standard percent-encoding.
+    - **Automated Tests:**
+      - `src/test/prDraftGenerator.test.ts`: 8 comprehensive automated scenarios covering grounded PR draft generation from exit code 0 evidence, accurate representation of failed verification and rollback status, deterministic offline fallback on broken/unavailable model, rejection of model hallucination claiming verification passed when it failed, automatic redaction of sensitive credentials and tokens, Git staging isolation guaranteeing unrelated files are not staged, valid GitHub compare URL construction, and complete 100% regression suite preservation.
+      - Total test suite: 137 tests across 21 suites (100% passing).
+  - **Files Created/Modified:**
+    - `src/git/prDraftGenerator.ts` (created)
+    - `src/git/index.ts` (created)
+    - `src/test/prDraftGenerator.test.ts` (created)
+    - `PROJECT_STATUS.md` (updated)
+  - **Verification:**
+    - `npm run compile`: Compiled TypeScript cleanly with code 0.
+    - `npm test`: 137/137 tests passing in 2.25s across 21 suites.
+    - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
+
 - **Milestone 12: End-to-End Stress Testing & Final Presentation**
   - Validate end-to-end workflow on real-world repositories (Kolibri & demo fixture), harden error handling, package extension, and prepare demo and pitch collateral.
 
