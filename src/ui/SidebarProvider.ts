@@ -9,6 +9,13 @@ import { checkGitAvailable, cloneRepository } from '../core/gitService';
 import { inspectProject, ProjectInspection } from '../core/projectInspector';
 import { executeCheck, CheckResult } from '../core/checkRunner';
 import { diagnoseCheckResult, DiagnosticReport } from '../diagnostics/diagnosticEngine';
+import {
+  proposeFixForIssue,
+  applyProposedFix,
+  rollbackAppliedFix,
+  ProposedFix,
+  FixRollbackRecord,
+} from '../fixes/fixEngine';
 
 export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'firstpr.sidebarView';
@@ -18,6 +25,10 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   private _activeDestPath: string | null = null;
   private _lastInspection: ProjectInspection | null = null;
   private _lastDiagnosticReport: DiagnosticReport | null = null;
+  private _activeProposedFix: ProposedFix | null = null;
+  private _lastRollbackRecord: FixRollbackRecord | null = null;
+  private _lastCheckType: 'test' | 'build' | 'lint' | 'typecheck' = 'test';
+  private _lastScriptName?: string;
 
   public get activeDestPath(): string | null {
     return this._activeDestPath;
@@ -33,6 +44,14 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
 
   public get lastDiagnosticReport(): DiagnosticReport | null {
     return this._lastDiagnosticReport;
+  }
+
+  public get activeProposedFix(): ProposedFix | null {
+    return this._activeProposedFix;
+  }
+
+  public get lastRollbackRecord(): FixRollbackRecord | null {
+    return this._lastRollbackRecord;
   }
 
   constructor(private readonly _extensionUri: vscode.Uri) {}
@@ -71,6 +90,12 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         case 'installDependencies':
           await this._handleInstallDependencies();
           break;
+        case 'applyAndVerifyFix':
+          await this._handleApplyAndVerifyFix();
+          break;
+        case 'rollbackFix':
+          await this._handleRollbackFix();
+          break;
         case 'clear':
           this._handleReset();
           break;
@@ -94,7 +119,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       detail: 'Validating repository URL...',
     });
 
-    // 1. Validate URL
     const validation: ValidationResult = validateGitHubUrl(rawUrl);
     if (!validation.isValid) {
       this._isBusy = false;
@@ -102,7 +126,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // 2. Verify Git Availability
     this._postToWebview({
       command: 'stageUpdate',
       stage: 'checking_prereqs',
@@ -119,7 +142,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // 3. Workspace Destination Selection
     this._postToWebview({
       command: 'stageUpdate',
       stage: 'preparing_workspace',
@@ -137,7 +159,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // 4. Check if Destination Already Exists
     const check = checkDestination(destPath);
     if (check.exists) {
       this._isBusy = false;
@@ -157,7 +178,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    // 5. Fresh Clone
     await this._executeClone(validation.normalizedUrl, destPath);
   }
 
@@ -188,7 +208,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       this._isBusy = false;
       this._abortController = null;
 
-      // Automatically inspect project after successful clone
       await this._handleInspectAndPresent(destPath, 'Repository cloned successfully.');
     } catch (err: unknown) {
       this._isBusy = false;
@@ -279,6 +298,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         result,
         inspection: reInspection,
         diagnosticReport,
+        proposedFix: null,
       });
     } catch (err: unknown) {
       this._isBusy = false;
@@ -300,6 +320,9 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       this._postToWebview({ command: 'error', message: 'Another operation is already in progress.' });
       return;
     }
+
+    this._lastCheckType = checkType;
+    this._lastScriptName = scriptName;
 
     const inspection = this._lastInspection || inspectProject(this._activeDestPath);
     this._lastInspection = inspection;
@@ -334,6 +357,19 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       const diagnosticReport = diagnoseCheckResult(result);
       this._lastDiagnosticReport = diagnosticReport;
 
+      // Look for a deterministically supported fix proposal for the first failed issue
+      let proposedFix: ProposedFix | null = null;
+      if (diagnosticReport.hasIssues) {
+        for (const issue of diagnosticReport.issues) {
+          const fix = proposeFixForIssue(issue, this._activeDestPath);
+          if (fix) {
+            proposedFix = fix;
+            break;
+          }
+        }
+      }
+      this._activeProposedFix = proposedFix;
+
       this._isBusy = false;
       this._abortController = null;
 
@@ -342,6 +378,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         result,
         inspection: this._lastInspection,
         diagnosticReport,
+        proposedFix,
       });
     } catch (err: unknown) {
       this._isBusy = false;
@@ -349,6 +386,101 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       const msg = err instanceof Error ? err.message : String(err);
       this._postToWebview({ command: 'error', message: msg });
     }
+  }
+
+  private async _handleApplyAndVerifyFix(): Promise<void> {
+    if (!this._activeDestPath || !this._activeProposedFix) {
+      this._postToWebview({ command: 'error', message: 'No active proposed fix to apply.' });
+      return;
+    }
+    if (this._isBusy) {
+      this._postToWebview({ command: 'error', message: 'Another operation is in progress.' });
+      return;
+    }
+
+    this._isBusy = true;
+    this._postToWebview({
+      command: 'stageUpdate',
+      stage: 'applying_patch',
+      detail: `Applying approved fix to ${this._activeProposedFix.relativeFilePath}...`,
+    });
+
+    // 1. Safely apply patch to disk
+    const applyRes = applyProposedFix(this._activeProposedFix, this._activeDestPath);
+    if (!applyRes.success || !applyRes.rollbackRecord) {
+      this._isBusy = false;
+      this._postToWebview({
+        command: 'error',
+        message: applyRes.error || 'Failed to apply patch.',
+      });
+      return;
+    }
+
+    this._lastRollbackRecord = applyRes.rollbackRecord;
+
+    // 2. Re-run the specific check that failed originally
+    this._postToWebview({
+      command: 'stageUpdate',
+      stage: 'reverifying',
+      detail: `Re-running "${this._lastScriptName || this._lastCheckType}" to verify fix...`,
+      cancellable: true,
+    });
+
+    this._abortController = new AbortController();
+
+    try {
+      const recheckResult: CheckResult = await executeCheck({
+        cwd: this._activeDestPath,
+        checkType: this._lastCheckType,
+        scriptName: this._lastScriptName,
+        signal: this._abortController.signal,
+        timeoutMs: 90 * 1000,
+        allowedScripts: this._lastInspection?.scripts,
+      });
+
+      const recheckDiagnosis = diagnoseCheckResult(recheckResult);
+      this._lastDiagnosticReport = recheckDiagnosis;
+      this._isBusy = false;
+      this._abortController = null;
+
+      this._postToWebview({
+        command: 'reverificationComplete',
+        recheckResult,
+        recheckDiagnosis,
+        rollbackAvailable: true,
+        fixApplied: true,
+        appliedFixTitle: this._activeProposedFix.title,
+      });
+    } catch (err: unknown) {
+      this._isBusy = false;
+      this._abortController = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      this._postToWebview({ command: 'error', message: `Re-verification error: ${msg}` });
+    }
+  }
+
+  private async _handleRollbackFix(): Promise<void> {
+    if (!this._activeDestPath || !this._lastRollbackRecord) {
+      this._postToWebview({ command: 'error', message: 'No rollback record available.' });
+      return;
+    }
+
+    const res = rollbackAppliedFix(this._lastRollbackRecord, this._activeDestPath);
+    if (!res.success) {
+      this._postToWebview({
+        command: 'error',
+        message: res.error || 'Rollback failed.',
+      });
+      return;
+    }
+
+    this._lastRollbackRecord = null;
+    this._activeProposedFix = null;
+
+    vscode.window.showInformationMessage('FirstPR: Rolled back applied patch successfully.');
+
+    // Re-run check to return to baseline state
+    await this._handleRunCheck(this._lastCheckType, this._lastScriptName);
   }
 
   private _handleCancelActiveOperation(): void {
@@ -383,6 +515,8 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     this._activeDestPath = null;
     this._lastInspection = null;
     this._lastDiagnosticReport = null;
+    this._activeProposedFix = null;
+    this._lastRollbackRecord = null;
     this._postToWebview({ command: 'reset' });
   }
 
@@ -495,6 +629,13 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     .secondary-btn:hover:not(:disabled) {
       background-color: var(--vscode-button-secondaryHoverBackground, #45494e);
     }
+    .success-btn {
+      background-color: #28a745;
+      color: #ffffff;
+    }
+    .success-btn:hover:not(:disabled) {
+      background-color: #218838;
+    }
     .danger-btn {
       background-color: var(--vscode-errorForeground, #d9534f);
       color: #ffffff;
@@ -578,26 +719,11 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-badge-foreground);
       font-weight: 600;
     }
-    .tag.warn {
-      background: #cca700;
-      color: #000;
-    }
-    .tag.ok {
-      background: #28a745;
-      color: #fff;
-    }
-    .tag.quality-strong {
-      background: var(--vscode-inputValidation-infoBorder, #007acc);
-      color: #fff;
-    }
-    .tag.quality-possible {
-      background: #cca700;
-      color: #000;
-    }
-    .tag.quality-insufficient {
-      background: #555;
-      color: #ddd;
-    }
+    .tag.warn { background: #cca700; color: #000; }
+    .tag.ok { background: #28a745; color: #fff; }
+    .tag.quality-strong { background: var(--vscode-inputValidation-infoBorder, #007acc); color: #fff; }
+    .tag.quality-possible { background: #cca700; color: #000; }
+    .tag.quality-insufficient { background: #555; color: #ddd; }
 
     .path-pill {
       margin-top: 6px;
@@ -656,12 +782,8 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       border-left: 4px solid var(--vscode-inputValidation-errorBorder, #be1100);
       border-radius: 3px;
     }
-    .issue-card.clean_pass {
-      border-left: 4px solid #28a745;
-    }
-    .issue-card.warning {
-      border-left: 4px solid #cca700;
-    }
+    .issue-card.clean_pass { border-left: 4px solid #28a745; }
+    .issue-card.warning { border-left: 4px solid #cca700; }
     .issue-header {
       font-weight: 600;
       font-size: 12px;
@@ -678,9 +800,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       margin-bottom: 6px;
       display: inline-block;
     }
-    .issue-field {
-      margin-top: 8px;
-    }
+    .issue-field { margin-top: 8px; }
     .field-title {
       font-size: 10px;
       font-weight: 700;
@@ -689,10 +809,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-descriptionForeground);
       margin-bottom: 2px;
     }
-    .field-content {
-      font-size: 11px;
-      line-height: 1.4;
-    }
+    .field-content { font-size: 11px; line-height: 1.4; }
     .evidence-block {
       background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.25));
       padding: 6px 8px;
@@ -705,6 +822,38 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       max-height: 140px;
       overflow-y: auto;
     }
+
+    /* Diff Preview Card */
+    .diff-card {
+      margin-top: 12px;
+      padding: 12px;
+      border-radius: 4px;
+      background: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-inputValidation-infoBorder, #007acc);
+    }
+    .diff-viewer {
+      margin-top: 6px;
+      padding: 8px;
+      background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+      border: 1px solid var(--vscode-widget-border, #333);
+      border-radius: 3px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11px;
+      white-space: pre;
+      overflow-x: auto;
+      max-height: 160px;
+    }
+    .diff-line-del {
+      color: var(--vscode-diffEditor-removedTextForeground, #ff7b72);
+      background: rgba(255, 0, 0, 0.15);
+      display: block;
+    }
+    .diff-line-add {
+      color: var(--vscode-diffEditor-insertedTextForeground, #7ee787);
+      background: rgba(0, 255, 0, 0.15);
+      display: block;
+    }
+    .diff-line-ctx { color: var(--vscode-descriptionForeground); display: block; }
   </style>
 </head>
 <body>
@@ -756,7 +905,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
-  <!-- Project Inspection & Check Runner Card -->
+  <!-- Project Inspection Card -->
   <div id="inspection-card" class="card info">
     <div class="stage-title" id="inspection-title">Repository Ready</div>
     <div id="inspection-banner" class="stage-detail"></div>
@@ -785,6 +934,36 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
 
     <div class="btn-group" style="margin-top:12px;">
       <button id="open-vscode-btn" class="secondary-btn" style="width:100%;">Open in VS Code</button>
+    </div>
+  </div>
+
+  <!-- Proposed Fix & Diff Preview Card -->
+  <div id="fix-preview-card" class="diff-card" style="display:none;">
+    <div class="stage-title" style="color:var(--vscode-inputValidation-infoBorder, #007acc);">
+      Proposed Fix Available
+    </div>
+    <div id="fix-title" style="font-weight:600;margin-top:4px;"></div>
+    <div id="fix-desc" style="font-size:11px;color:var(--vscode-descriptionForeground);margin-top:2px;"></div>
+    <div id="fix-file" class="issue-location" style="margin-top:6px;"></div>
+
+    <div class="section-subtitle">Unified Diff Preview:</div>
+    <div id="diff-box" class="diff-viewer"></div>
+
+    <div id="fix-safety-notes" class="notice-box" style="margin-top:8px;font-size:10.5px;"></div>
+
+    <div class="btn-group" style="margin-top:10px;">
+      <button id="apply-fix-btn" class="success-btn" style="width:100%;">
+        Approve & Apply Fix (Re-verifies Check)
+      </button>
+    </div>
+  </div>
+
+  <!-- Re-verification Outcome Card -->
+  <div id="reverification-card" class="card" style="display:none;">
+    <div class="stage-title" id="reverif-title">Verification Outcome</div>
+    <div id="reverif-message" class="stage-detail"></div>
+    <div class="btn-group" style="margin-top:8px;">
+      <button id="rollback-btn" class="secondary-btn">Rollback Patch</button>
     </div>
   </div>
 
@@ -837,6 +1016,19 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     const missingChecksNote = document.getElementById('missing-checks-note');
     const openVsCodeBtn = document.getElementById('open-vscode-btn');
 
+    const fixPreviewCard = document.getElementById('fix-preview-card');
+    const fixTitle = document.getElementById('fix-title');
+    const fixDesc = document.getElementById('fix-desc');
+    const fixFile = document.getElementById('fix-file');
+    const diffBox = document.getElementById('diff-box');
+    const fixSafetyNotes = document.getElementById('fix-safety-notes');
+    const applyFixBtn = document.getElementById('apply-fix-btn');
+
+    const reverificationCard = document.getElementById('reverification-card');
+    const reverifTitle = document.getElementById('reverif-title');
+    const reverifMessage = document.getElementById('reverif-message');
+    const rollbackBtn = document.getElementById('rollback-btn');
+
     const diagnosticsCard = document.getElementById('diagnostics-card');
     const diagnosticsHeader = document.getElementById('diagnostics-header');
     const diagnosticsSummary = document.getElementById('diagnostics-summary');
@@ -856,6 +1048,8 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       progressCard.classList.remove('active');
       promptCard.classList.remove('active');
       inspectionCard.classList.remove('active');
+      fixPreviewCard.style.display = 'none';
+      reverificationCard.style.display = 'none';
       diagnosticsCard.style.display = 'none';
       errorCard.classList.remove('active');
     }
@@ -945,6 +1139,14 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       toggleLogBtn.textContent = isLogVisible ? 'Hide Full Terminal Output' : 'Show Full Terminal Output';
     });
 
+    applyFixBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'applyAndVerifyFix' });
+    });
+
+    rollbackBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'rollbackFix' });
+    });
+
     function renderInspection(banner, destPath, insp) {
       currentDestPath = destPath;
       currentInspection = insp;
@@ -1001,6 +1203,34 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       inspectionCard.classList.add('active');
     }
 
+    function renderDiffPreview(fix) {
+      if (!fix) {
+        fixPreviewCard.style.display = 'none';
+        return;
+      }
+      fixTitle.textContent = fix.title;
+      fixDesc.textContent = fix.description;
+      fixFile.textContent = 'Target: ' + fix.relativeFilePath;
+
+      // Color-code diff lines
+      const lines = (fix.unifiedDiff || '').split('\\n');
+      let coloredDiff = '';
+      lines.forEach(l => {
+        if (l.startsWith('+') && !l.startsWith('+++')) {
+          coloredDiff += '<span class="diff-line-add">' + escapeHtml(l) + '</span>';
+        } else if (l.startsWith('-') && !l.startsWith('---')) {
+          coloredDiff += '<span class="diff-line-del">' + escapeHtml(l) + '</span>';
+        } else {
+          coloredDiff += '<span class="diff-line-ctx">' + escapeHtml(l) + '</span>';
+        }
+      });
+      diffBox.innerHTML = coloredDiff;
+
+      const notes = fix.safetyNotes || [];
+      fixSafetyNotes.innerHTML = '<strong>Safety Guarantees:</strong> ' + escapeHtml(notes.join(' '));
+      fixPreviewCard.style.display = 'block';
+    }
+
     function renderDiagnosticReport(report, result) {
       diagnosticsCard.style.display = 'block';
       diagnosticsHeader.textContent = report.hasIssues ? 'Diagnostic Findings' : 'Check Passed Cleanly';
@@ -1045,7 +1275,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         issuesList.appendChild(card);
       });
 
-      const output = (result.stdout ? result.stdout : '') + (result.stderr ? (result.stdout ? '\n--- STDERR ---\n' : '') + result.stderr : '');
+      const output = (result.stdout ? result.stdout : '') + (result.stderr ? (result.stdout ? '\\n--- STDERR ---\\n' : '') + result.stderr : '');
       rawLogBox.textContent = output.trim() || '(No terminal output)';
       toggleLogBtn.textContent = 'Show Full Terminal Output (' + (result.command || 'npm') + ', exit ' + (result.exitCode !== null ? result.exitCode : 'N/A') + ')';
     }
@@ -1083,7 +1313,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         case 'checkStream': {
-          stageDetail.textContent = msg.chunk ? msg.chunk.trim().split('\n').pop() : '';
+          stageDetail.textContent = msg.chunk ? msg.chunk.trim().split('\\n').pop() : '';
           break;
         }
 
@@ -1112,6 +1342,27 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
           }
           if (msg.diagnosticReport && msg.result) {
             renderDiagnosticReport(msg.diagnosticReport, msg.result);
+          }
+          renderDiffPreview(msg.proposedFix);
+          break;
+        }
+
+        case 'reverificationComplete': {
+          hideAllCards();
+          setBusy(false);
+          if (currentInspection) {
+            renderInspection('Repository Ready', currentDestPath, currentInspection);
+          }
+          const isPassed = msg.recheckResult.exitCode === 0;
+          reverificationCard.className = 'card active ' + (isPassed ? 'success' : 'error');
+          reverifTitle.textContent = isPassed ? 'Fix Verified Successfully' : 'Re-verification Failed';
+          reverifMessage.textContent = isPassed
+            ? 'Applied patch "' + escapeHtml(msg.appliedFixTitle || '') + '" resolved the issue! All checks exited with code 0.'
+            : 'Check failed again with exit code ' + msg.recheckResult.exitCode + '. You can rollback below.';
+          reverificationCard.style.display = 'block';
+
+          if (msg.recheckDiagnosis && msg.recheckResult) {
+            renderDiagnosticReport(msg.recheckDiagnosis, msg.recheckResult);
           }
           break;
         }

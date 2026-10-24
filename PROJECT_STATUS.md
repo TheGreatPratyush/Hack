@@ -19,10 +19,13 @@
   - Safe process execution via `child_process.spawn` using strict argument arrays with `shell: false` (no shell interpolation).
   - Script validation: checks script names against injection patterns (`^[a-zA-Z0-9_.:-]+$`) and validates against inspected `package.json` scripts.
   - Execution bounded by timeouts (60s checks, 180s installs) and output buffer limits (100KB per stream).
-- **Diagnostics Engine:** Deterministic rule-based analysis parsing real stdout/stderr and `package.json` configurations to isolate:
-  1. Observed Evidence (raw, unvarnished exit code/message).
-  2. Likely Cause (common npm/Node/TS issues, missing dependencies, script errors).
-  3. Recommended Next Actions.
+- **Diagnostics & Fix Engine:**
+  - Deterministic rule-based analysis parsing real stdout/stderr and `package.json` configurations.
+  - Strict separation of facts (Observed Evidence) from hypotheses (Likely Explanations).
+  - Zero disk modifications prior to explicit human review of a unified diff.
+  - SHA-256 content hashing to prevent applying patches to stale or conflicting files.
+  - Automated re-check execution to verify whether a patch resolves the original failure.
+  - One-click safe rollback protecting subsequent independent user edits.
 
 ---
 
@@ -44,55 +47,46 @@
 
 ### Milestone 3: Evidence-to-Issue Diagnostic Engine
 - **Status:** `COMPLETE`
+- **Commit:** `6308f7c2fe8a40cd0634963c1b5fb5d3be72c001` pushed to `origin/main`.
+- **Deliverables:** Diagnostic Engine (TypeScript compile errors, test assertion failures, missing modules, syntax errors), structured issue cards in UI, offline demo fixture (`fixtures/demo-calc/`), 52 unit/integration tests across 7 suites.
+
+### Milestone 4: Safe Fix Proposal, Diff Preview, and Re-verification
+- **Status:** `COMPLETE`
 - **Deliverables:**
-  - **Diagnostic Engine (`src/diagnostics/diagnosticEngine.ts`):**
-    - Parses `CheckResult` from check execution into structured, traceable `DiagnosticIssue` objects.
-    - Deterministically classifies:
-      1. TypeScript compile errors (`TSxxxx`) with file path, line, column, code snippet, and type incompatibility explanations.
-      2. Test assertion failures (`node:test`, `jest`, `mocha`) with failed test name, stack frame location, expected vs received discrepancy.
-      3. Missing dependencies / imports (distinguishes external npm packages from missing local relative imports).
-      4. Syntax errors with file and line extraction.
-      5. Unknown failures handled honestly without inventing files or line numbers.
-      6. Clean passes with honest disclaimers (does not falsely claim zero bugs).
-    - Strictly distinguishes:
-      - **1. What Failed? (Observed Evidence):** Direct, bounded compiler/runner output snippet.
-      - **2. Why It Likely Failed (Hypothesis):** Clear explanation labeled explicitly as a hypothesis.
-      - **3. Recommended Next Step:** Concrete debugging/investigation action.
-    - Evidence Quality Badges: `Strong evidence`, `Possible explanation`, `Insufficient evidence`.
+  - **Fix Engine (`src/fixes/fixEngine.ts`):**
+    - Deterministic fix generation for supported cases (return value type/format discrepancy, missing dependency declaration, TypeScript type literal fixes).
+    - Refuses to propose speculative patches for ambiguous or unconfirmed errors.
+    - Unified diff generator (`generateUnifiedDiff`) with standard headers and context lines.
+    - Path traversal protection ensuring all edits are strictly within workspace bounds.
+    - Content hashing (SHA-256) detecting disk modifications and rejecting stale diff previews.
+    - Atomic file patch application producing a `FixRollbackRecord`.
+    - Safe rollback engine (`rollbackAppliedFix`) verifying file integrity before restoring original content.
   - **Sidebar UI Integration (`src/ui/SidebarProvider.ts`):**
-    - Renders structured Diagnostic Issue Cards directly beneath check controls.
-    - Displays file location badges (`file:line:col`).
-    - Collapsible "Show Full Terminal Output" toggle for raw stdout/stderr transparency.
-  - **Reproducible Demonstration Fixture (`fixtures/demo-calc/`):**
-    - Standalone demo repository with an intentional discount calculation format discrepancy (`"20%"` string vs `20` number).
-    - Can be demonstrated instantly and reliably offline with zero AI API dependency.
+    - Diff Preview Card: displays proposed fix title, description, target file, syntax-highlighted unified diff box (green `+` added, red `-` deleted), and safety notes.
+    - Approval Action: "Approve & Apply Fix (Re-verifies Check)" requires explicit user click.
+    - Re-verification Pipeline: automatically re-executes the failed check after patch application.
+    - Outcome Status: renders bright green "Fix Verified Successfully" card upon exit code 0, or clear failure notice if re-check fails.
+    - Rollback Control: "Rollback Patch" button restores original source file with confirmation.
   - **Automated Tests:**
-    - `src/test/diagnosticEngine.test.ts` (11 unit tests)
-    - `src/test/demoPipeline.test.ts` (1 integration test covering end-to-end inspection, execution, and diagnosis against `demo-calc`)
-    - Total test suite: 52 tests across 7 suites (100% passing).
+    - `src/test/fixEngine.test.ts` (8 unit tests covering diff generation, deterministic proposal, conflict detection, rollback, traversal rejection).
+    - `src/test/endToEndFixPipeline.test.ts` (integration test covering failure capture $\to$ diff preview $\to$ user approval $\to$ verified exit code 0 $\to$ rollback).
+    - Total test suite: 61 tests across 9 suites (100% passing).
 - **Files Created/Modified:**
-  - `src/diagnostics/diagnosticEngine.ts` (created)
-  - `fixtures/demo-calc/package.json` (created)
-  - `fixtures/demo-calc/src/calc.js` (created)
-  - `fixtures/demo-calc/test/calc.test.js` (created)
-  - `src/test/diagnosticEngine.test.ts` (created)
-  - `src/test/demoPipeline.test.ts` (created)
-  - `src/core/checkRunner.ts` (updated with environment sanitization)
-  - `src/ui/SidebarProvider.ts` (updated with issue card rendering)
+  - `src/fixes/fixEngine.ts` (created)
+  - `src/test/fixEngine.test.ts` (created)
+  - `src/test/endToEndFixPipeline.test.ts` (created)
+  - `src/ui/SidebarProvider.ts` (updated)
   - `PROJECT_STATUS.md` (updated)
 - **Commands Executed & Results:**
   - `npm run compile`: Compiled TypeScript cleanly (`tsc -p ./`) with code 0.
-  - `npm test`: Ran 52 unit/integration tests across 7 suites. Result: 52 passed, 0 failed in 1.27s.
+  - `npm test`: Ran 61 unit/integration tests across 9 suites. Result: 61 passed, 0 failed in 1.30s.
   - `npx @vscode/vsce ls`: Verified packaging manifest integrity. Exited with code 0.
 - **Known Issues & Remaining Work:**
-  - Code fix proposal, unified diff preview, and patch application are scheduled for Milestone 4.
+  - Automated branch creation (`firstpr/fix-...`), descriptive git commit generation, and pull request preparation are scheduled for Milestone 5.
 
 ---
 
 ## Planned Implementation Milestones
-
-### Milestone 4: Proposed Fix Preview & Re-check Verification
-- **Goal:** Provide concrete unified diff preview; user clicks "Apply Patch"; re-runs test to verify fix turns green; rolls back if check fails.
 
 ### Milestone 5: Branch & Pull Request Preparation
 - **Goal:** Create dedicated local branch (`firstpr/fix-<issue>`), commit verified changes with descriptive message, provide direct GitHub PR link.
