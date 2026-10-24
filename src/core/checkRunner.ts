@@ -173,9 +173,13 @@ export async function executeCheck(options: RunCheckOptions): Promise<CheckResul
       }
     };
 
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.NODE_TEST_CONTEXT;
+
     try {
       proc = spawn('npm', args, {
         cwd,
+        env: cleanEnv,
         shell: false,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],

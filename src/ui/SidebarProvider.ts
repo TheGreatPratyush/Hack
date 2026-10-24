@@ -8,6 +8,7 @@ import {
 import { checkGitAvailable, cloneRepository } from '../core/gitService';
 import { inspectProject, ProjectInspection } from '../core/projectInspector';
 import { executeCheck, CheckResult } from '../core/checkRunner';
+import { diagnoseCheckResult, DiagnosticReport } from '../diagnostics/diagnosticEngine';
 
 export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'firstpr.sidebarView';
@@ -16,6 +17,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
   private _abortController: AbortController | null = null;
   private _activeDestPath: string | null = null;
   private _lastInspection: ProjectInspection | null = null;
+  private _lastDiagnosticReport: DiagnosticReport | null = null;
 
   public get activeDestPath(): string | null {
     return this._activeDestPath;
@@ -27,6 +29,10 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
 
   public get lastInspection(): ProjectInspection | null {
     return this._lastInspection;
+  }
+
+  public get lastDiagnosticReport(): DiagnosticReport | null {
+    return this._lastDiagnosticReport;
   }
 
   constructor(private readonly _extensionUri: vscode.Uri) {}
@@ -250,7 +256,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         cwd: this._activeDestPath,
         checkType: 'install',
         signal: this._abortController.signal,
-        timeoutMs: 180 * 1000, // 3 minutes for install
+        timeoutMs: 180 * 1000,
         onStdout: (chunk) => {
           this._postToWebview({ command: 'checkStream', stream: 'stdout', chunk });
         },
@@ -259,10 +265,12 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         },
       });
 
+      const diagnosticReport = diagnoseCheckResult(result);
+      this._lastDiagnosticReport = diagnosticReport;
+
       this._isBusy = false;
       this._abortController = null;
 
-      // Re-inspect to update dependency status
       const reInspection = inspectProject(this._activeDestPath);
       this._lastInspection = reInspection;
 
@@ -270,6 +278,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         command: 'checkFinished',
         result,
         inspection: reInspection,
+        diagnosticReport,
       });
     } catch (err: unknown) {
       this._isBusy = false;
@@ -322,6 +331,9 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         },
       });
 
+      const diagnosticReport = diagnoseCheckResult(result);
+      this._lastDiagnosticReport = diagnosticReport;
+
       this._isBusy = false;
       this._abortController = null;
 
@@ -329,6 +341,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         command: 'checkFinished',
         result,
         inspection: this._lastInspection,
+        diagnosticReport,
       });
     } catch (err: unknown) {
       this._isBusy = false;
@@ -369,6 +382,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     this._abortController = null;
     this._activeDestPath = null;
     this._lastInspection = null;
+    this._lastDiagnosticReport = null;
     this._postToWebview({ command: 'reset' });
   }
 
@@ -572,6 +586,19 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       background: #28a745;
       color: #fff;
     }
+    .tag.quality-strong {
+      background: var(--vscode-inputValidation-infoBorder, #007acc);
+      color: #fff;
+    }
+    .tag.quality-possible {
+      background: #cca700;
+      color: #000;
+    }
+    .tag.quality-insufficient {
+      background: #555;
+      color: #ddd;
+    }
+
     .path-pill {
       margin-top: 6px;
       padding: 5px 7px;
@@ -589,7 +616,7 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       gap: 6px;
     }
     .log-box {
-      margin-top: 8px;
+      margin-top: 6px;
       padding: 8px;
       background: var(--vscode-terminal-background, #000);
       color: var(--vscode-terminal-foreground, #ccc);
@@ -618,6 +645,65 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       border-left: 3px solid #cca700;
       font-size: 11px;
       line-height: 1.35;
+    }
+
+    /* Diagnostics & Issue Cards */
+    .issue-card {
+      margin-top: 10px;
+      padding: 10px;
+      background: var(--vscode-editor-background, rgba(0,0,0,0.2));
+      border: 1px solid var(--vscode-widget-border, #444);
+      border-left: 4px solid var(--vscode-inputValidation-errorBorder, #be1100);
+      border-radius: 3px;
+    }
+    .issue-card.clean_pass {
+      border-left: 4px solid #28a745;
+    }
+    .issue-card.warning {
+      border-left: 4px solid #cca700;
+    }
+    .issue-header {
+      font-weight: 600;
+      font-size: 12px;
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 6px;
+    }
+    .issue-location {
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11px;
+      color: var(--vscode-textLink-foreground, #3794ff);
+      margin-bottom: 6px;
+      display: inline-block;
+    }
+    .issue-field {
+      margin-top: 8px;
+    }
+    .field-title {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 2px;
+    }
+    .field-content {
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .evidence-block {
+      background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.25));
+      padding: 6px 8px;
+      border-radius: 2px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 10.5px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      border: 1px solid var(--vscode-widget-border, #333);
+      max-height: 140px;
+      overflow-y: auto;
     }
   </style>
 </head>
@@ -702,13 +788,19 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
-  <!-- Check Result Card -->
-  <div id="result-card" class="card">
-    <div class="stage-title" id="result-title">Check Result</div>
-    <div class="tag-row" id="result-tags"></div>
-    <div id="result-explanation" style="margin-top:6px;font-size:11px;line-height:1.4;"></div>
-    <div class="section-subtitle">Terminal Output:</div>
-    <div id="result-output" class="log-box"></div>
+  <!-- Diagnostics & Issue Cards Container -->
+  <div id="diagnostics-card" class="card active" style="display:none;">
+    <div class="stage-title" id="diagnostics-header">Diagnostic Findings</div>
+    <div id="diagnostics-summary" class="stage-detail" style="margin-bottom:8px;"></div>
+    <div id="issues-list"></div>
+
+    <!-- Toggle Raw Terminal Log -->
+    <div style="margin-top:10px;">
+      <button id="toggle-log-btn" class="secondary-btn" style="width:100%;font-size:11px;">Show Full Terminal Output</button>
+      <div id="raw-log-container" style="display:none;margin-top:6px;">
+        <div id="raw-log-box" class="log-box"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Error Card -->
@@ -736,7 +828,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     const cancelReuseBtn = document.getElementById('cancel-reuse-btn');
 
     const inspectionCard = document.getElementById('inspection-card');
-    const inspectionTitle = document.getElementById('inspection-title');
     const inspectionBanner = document.getElementById('inspection-banner');
     const inspectionPath = document.getElementById('inspection-path');
     const inspectionTags = document.getElementById('inspection-tags');
@@ -746,23 +837,26 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
     const missingChecksNote = document.getElementById('missing-checks-note');
     const openVsCodeBtn = document.getElementById('open-vscode-btn');
 
-    const resultCard = document.getElementById('result-card');
-    const resultTitle = document.getElementById('result-title');
-    const resultTags = document.getElementById('result-tags');
-    const resultExplanation = document.getElementById('result-explanation');
-    const resultOutput = document.getElementById('result-output');
+    const diagnosticsCard = document.getElementById('diagnostics-card');
+    const diagnosticsHeader = document.getElementById('diagnostics-header');
+    const diagnosticsSummary = document.getElementById('diagnostics-summary');
+    const issuesList = document.getElementById('issues-list');
+    const toggleLogBtn = document.getElementById('toggle-log-btn');
+    const rawLogContainer = document.getElementById('raw-log-container');
+    const rawLogBox = document.getElementById('raw-log-box');
 
     const errorCard = document.getElementById('error-card');
     const errorMessage = document.getElementById('error-message');
 
     let currentDestPath = '';
     let currentInspection = null;
+    let isLogVisible = false;
 
     function hideAllCards() {
       progressCard.classList.remove('active');
       promptCard.classList.remove('active');
       inspectionCard.classList.remove('active');
-      resultCard.classList.remove('active');
+      diagnosticsCard.style.display = 'none';
       errorCard.classList.remove('active');
     }
 
@@ -845,6 +939,12 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({ command: 'installDependencies' });
     });
 
+    toggleLogBtn.addEventListener('click', () => {
+      isLogVisible = !isLogVisible;
+      rawLogContainer.style.display = isLogVisible ? 'block' : 'none';
+      toggleLogBtn.textContent = isLogVisible ? 'Hide Full Terminal Output' : 'Show Full Terminal Output';
+    });
+
     function renderInspection(banner, destPath, insp) {
       currentDestPath = destPath;
       currentInspection = insp;
@@ -852,7 +952,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       inspectionBanner.textContent = banner;
       inspectionPath.textContent = destPath;
 
-      // Tags
       inspectionTags.innerHTML = '';
       if (insp.packageName) {
         inspectionTags.innerHTML += '<span class="tag">' + escapeHtml(insp.packageName) + (insp.version ? ' v' + escapeHtml(insp.version) : '') + '</span>';
@@ -871,7 +970,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         depWarning.style.display = 'block';
       }
 
-      // Check Buttons
       checksBtnGroup.innerHTML = '';
       const checks = insp.availableChecks || {};
       const checkKeys = Object.keys(checks);
@@ -894,7 +992,6 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
         });
       }
 
-      // Missing checks
       if (insp.missingChecks && insp.missingChecks.length > 0) {
         missingChecksNote.textContent = 'Missing standard scripts: ' + insp.missingChecks.join(', ');
       } else {
@@ -904,19 +1001,53 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
       inspectionCard.classList.add('active');
     }
 
-    function renderCheckResult(result) {
-      resultCard.className = 'card active ' + (result.status === 'passed' ? 'success' : (result.status === 'failed' ? 'error' : 'info'));
-      resultTitle.textContent = 'Check: ' + (result.checkName || 'Execution');
+    function renderDiagnosticReport(report, result) {
+      diagnosticsCard.style.display = 'block';
+      diagnosticsHeader.textContent = report.hasIssues ? 'Diagnostic Findings' : 'Check Passed Cleanly';
+      diagnosticsSummary.textContent = report.summary;
 
-      resultTags.innerHTML =
-        '<span class="tag ' + (result.status === 'passed' ? 'ok' : 'warn') + '">Status: ' + escapeHtml(result.status.toUpperCase()) + '</span>' +
-        '<span class="tag">Exit Code: ' + (result.exitCode !== null ? result.exitCode : 'N/A') + '</span>' +
-        '<span class="tag">' + Math.round(result.durationMs || 0) + 'ms</span>';
+      issuesList.innerHTML = '';
+      (report.issues || []).forEach(issue => {
+        const card = document.createElement('div');
+        const isClean = issue.category === 'clean_pass';
+        card.className = 'issue-card ' + (isClean ? 'clean_pass' : (issue.severity === 'warning' ? 'warning' : ''));
 
-      resultExplanation.textContent = result.explanation || '';
+        let qualityClass = 'tag quality-strong';
+        if (issue.evidenceQuality === 'Possible explanation') qualityClass = 'tag quality-possible';
+        if (issue.evidenceQuality === 'Insufficient evidence') qualityClass = 'tag quality-insufficient';
+
+        let locHtml = '';
+        if (issue.location) {
+          locHtml = '<div class="issue-location">Location: <strong>' + escapeHtml(issue.location.relativePath) +
+                    (issue.location.line ? ':' + issue.location.line : '') +
+                    (issue.location.column ? ':' + issue.location.column : '') + '</strong></div>';
+        }
+
+        card.innerHTML =
+          '<div class="issue-header">' +
+            '<div>' + escapeHtml(issue.title) + '</div>' +
+            '<span class="' + qualityClass + '">' + escapeHtml(issue.evidenceQuality) + '</span>' +
+          '</div>' +
+          locHtml +
+          '<div class="issue-field">' +
+            '<div class="field-title">1. What Failed? (Observed Evidence)</div>' +
+            '<div class="evidence-block">' + escapeHtml(issue.observedEvidence) + '</div>' +
+          '</div>' +
+          '<div class="issue-field">' +
+            '<div class="field-title">2. Why It Likely Failed (Hypothesis)</div>' +
+            '<div class="field-content">' + escapeHtml(issue.likelyExplanation) + '</div>' +
+          '</div>' +
+          '<div class="issue-field">' +
+            '<div class="field-title">3. Recommended Next Step</div>' +
+            '<div class="field-content">' + escapeHtml(issue.recommendedAction) + '</div>' +
+          '</div>';
+
+        issuesList.appendChild(card);
+      });
 
       const output = (result.stdout ? result.stdout : '') + (result.stderr ? (result.stdout ? '\n--- STDERR ---\n' : '') + result.stderr : '');
-      resultOutput.textContent = output.trim() || '(No output recorded)';
+      rawLogBox.textContent = output.trim() || '(No terminal output)';
+      toggleLogBtn.textContent = 'Show Full Terminal Output (' + (result.command || 'npm') + ', exit ' + (result.exitCode !== null ? result.exitCode : 'N/A') + ')';
     }
 
     function escapeHtml(str) {
@@ -979,7 +1110,9 @@ export class FirstPRSidebarProvider implements vscode.WebviewViewProvider {
           if (msg.inspection) {
             renderInspection('Repository Ready', currentDestPath, msg.inspection);
           }
-          renderCheckResult(msg.result);
+          if (msg.diagnosticReport && msg.result) {
+            renderDiagnosticReport(msg.diagnosticReport, msg.result);
+          }
           break;
         }
 

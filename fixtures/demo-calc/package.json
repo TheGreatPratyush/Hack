@@ -1,0 +1,8 @@
+{
+  "name": "firstpr-demo-calc",
+  "version": "1.0.0",
+  "description": "Reproducible demonstration repository for FirstPR diagnostic pipeline",
+  "scripts": {
+    "test": "node test/calc.test.js"
+  }
+}

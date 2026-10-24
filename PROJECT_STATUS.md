@@ -39,49 +39,57 @@
 
 ### Milestone 2: Repository Inspection and Check Runner
 - **Status:** `COMPLETE`
+- **Commit:** `0fb99f880a59a90270ecff80d81136c60b9f33b3` pushed to `origin/main`.
+- **Deliverables:** Project Inspector, Check Runner with argument arrays & timeouts, permission-gated execution UI, 40 unit tests across 5 suites.
+
+### Milestone 3: Evidence-to-Issue Diagnostic Engine
+- **Status:** `COMPLETE`
 - **Deliverables:**
-  - **Project Inspector (`src/core/projectInspector.ts`):**
-    - Locates and parses `package.json` (handles missing or malformed JSON gracefully).
-    - Detects project identity, version, scripts, TypeScript configuration (`tsconfig.json`), and lockfiles (`npm`, `yarn`, `pnpm`).
-    - Inspects `node_modules` to determine whether dependencies are installed.
-    - Classifies standard checks (`test`, `build`, `lint`, `typecheck`), filters out default npm placeholder test scripts (`"echo Error: no test specified"`), and determines missing checks.
-  - **Check Runner (`src/core/checkRunner.ts`):**
-    - Executes approved scripts strictly inside the repository directory using `child_process.spawn('npm', args, { shell: false })`.
-    - Validates script names against command injection characters (`isValidScriptName`).
-    - Enforces script authorization: rejects unapproved scripts not declared in `package.json`.
-    - Captures stdout and stderr separately with 100KB bounded output limits.
-    - Handles execution timeouts (60s default) and cancellation (`AbortSignal`) with escalating process termination (`SIGTERM` $\to$ `SIGKILL`).
-    - Produces structured `CheckResult` with exit code, duration, status, and concise human explanation.
-  - **UI Integration (`src/ui/SidebarProvider.ts`):**
-    - Inspects repository automatically upon clone completion or confirmed reuse.
-    - Displays project identity tags (package name, version, TypeScript badge, lockfile badge, dependency status).
-    - Highlights missing dependencies with an explicit warning and an optional "Install Dependencies (`npm install`)" button disclosing lifecycle script risks.
-    - Renders permission-gated check buttons for available scripts (e.g. `Run TEST (node --test)`).
-    - Displays check results card with status badge, exit code, duration, human explanation, and terminal output viewer.
+  - **Diagnostic Engine (`src/diagnostics/diagnosticEngine.ts`):**
+    - Parses `CheckResult` from check execution into structured, traceable `DiagnosticIssue` objects.
+    - Deterministically classifies:
+      1. TypeScript compile errors (`TSxxxx`) with file path, line, column, code snippet, and type incompatibility explanations.
+      2. Test assertion failures (`node:test`, `jest`, `mocha`) with failed test name, stack frame location, expected vs received discrepancy.
+      3. Missing dependencies / imports (distinguishes external npm packages from missing local relative imports).
+      4. Syntax errors with file and line extraction.
+      5. Unknown failures handled honestly without inventing files or line numbers.
+      6. Clean passes with honest disclaimers (does not falsely claim zero bugs).
+    - Strictly distinguishes:
+      - **1. What Failed? (Observed Evidence):** Direct, bounded compiler/runner output snippet.
+      - **2. Why It Likely Failed (Hypothesis):** Clear explanation labeled explicitly as a hypothesis.
+      - **3. Recommended Next Step:** Concrete debugging/investigation action.
+    - Evidence Quality Badges: `Strong evidence`, `Possible explanation`, `Insufficient evidence`.
+  - **Sidebar UI Integration (`src/ui/SidebarProvider.ts`):**
+    - Renders structured Diagnostic Issue Cards directly beneath check controls.
+    - Displays file location badges (`file:line:col`).
+    - Collapsible "Show Full Terminal Output" toggle for raw stdout/stderr transparency.
+  - **Reproducible Demonstration Fixture (`fixtures/demo-calc/`):**
+    - Standalone demo repository with an intentional discount calculation format discrepancy (`"20%"` string vs `20` number).
+    - Can be demonstrated instantly and reliably offline with zero AI API dependency.
   - **Automated Tests:**
-    - `src/test/projectInspector.test.ts` (8 unit tests)
-    - `src/test/checkRunner.test.ts` (8 unit tests)
-    - Total test suite: 40 tests across 5 suites.
+    - `src/test/diagnosticEngine.test.ts` (11 unit tests)
+    - `src/test/demoPipeline.test.ts` (1 integration test covering end-to-end inspection, execution, and diagnosis against `demo-calc`)
+    - Total test suite: 52 tests across 7 suites (100% passing).
 - **Files Created/Modified:**
-  - `src/core/projectInspector.ts` (created)
-  - `src/core/checkRunner.ts` (created)
-  - `src/test/projectInspector.test.ts` (created)
-  - `src/test/checkRunner.test.ts` (created)
-  - `src/ui/SidebarProvider.ts` (updated)
+  - `src/diagnostics/diagnosticEngine.ts` (created)
+  - `fixtures/demo-calc/package.json` (created)
+  - `fixtures/demo-calc/src/calc.js` (created)
+  - `fixtures/demo-calc/test/calc.test.js` (created)
+  - `src/test/diagnosticEngine.test.ts` (created)
+  - `src/test/demoPipeline.test.ts` (created)
+  - `src/core/checkRunner.ts` (updated with environment sanitization)
+  - `src/ui/SidebarProvider.ts` (updated with issue card rendering)
   - `PROJECT_STATUS.md` (updated)
 - **Commands Executed & Results:**
   - `npm run compile`: Compiled TypeScript cleanly (`tsc -p ./`) with code 0.
-  - `npm test`: Ran 40 unit tests across 5 suites. Result: 40 passed, 0 failed in 1.23s.
+  - `npm test`: Ran 52 unit/integration tests across 7 suites. Result: 52 passed, 0 failed in 1.27s.
   - `npx @vscode/vsce ls`: Verified packaging manifest integrity. Exited with code 0.
 - **Known Issues & Remaining Work:**
-  - Issue detection, root cause diagnostic analysis, and patch generation are scheduled for Milestones 3 & 4.
+  - Code fix proposal, unified diff preview, and patch application are scheduled for Milestone 4.
 
 ---
 
 ## Planned Implementation Milestones
-
-### Milestone 3: Concrete Issue Detection & Evidence Diagnosis
-- **Goal:** Detect real failure in repo (broken test, missing export, syntax error), extract exact failing file/line, separate *Observed Evidence* from *Likely Cause*.
 
 ### Milestone 4: Proposed Fix Preview & Re-check Verification
 - **Goal:** Provide concrete unified diff preview; user clicks "Apply Patch"; re-runs test to verify fix turns green; rolls back if check fails.
