@@ -214,8 +214,34 @@ Following intermediate hackathon evaluation, FirstPR is adopting a **Local LLM-a
     - `npm test`: 119/119 tests passing in 2.22s across 19 suites.
     - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
 
-- **Milestone 10: LLM-Assisted Bug Analysis & Verified Fixes**
-  - Ground diagnosis on actual check failures and source context, propose verified fixes for confirmed defects, and maintain rollback protections.
+- **Milestone 10: LLM-Assisted Bug Diagnosis & Verified Fixes**
+  - **Status:** `COMPLETE`
+  - **Deliverables:**
+    - **Failure Classifier (`classifyFailure` in `src/analysis/diagnosisEngine.ts`):**
+      - Strictly categorizes failures into `'environment_tooling'` (code 127, command not found, ENOENT, timeouts, cancellations), `'dependency_config'` (MODULE_NOT_FOUND, missing lockfiles/manifests), `'test_assertion'` (AssertionError, expect/toBe mismatches), or `'source_code_defect'` (SyntaxError, TypeError, TS errors).
+      - Core safety invariant: never treats missing tooling or uninstalled dependencies as proof of a source code defect.
+    - **Evidence-Backed Diagnosis Engine (`LlmDiagnosisEngine` in `src/analysis/diagnosisEngine.ts`):**
+      - Bounded evidence collection: extracts stdout/stderr traces, exit code, and reads bounded source context (10 lines around failure location) from disk.
+      - Anti-hallucination prompt engineering: explicitly instructs local Ollama to avoid speculative bugs and set `isPlausibleSourceDefect: false` when evidence is ambiguous.
+      - Grounding validation: checks that cited files exist on disk, ensures line numbers are within file bounds, and requires that `originalSnippet` is an exact substring of the target file before generating any patch. Rejects speculative hallucinations.
+      - Safe diff proposal: generates standard unified diffs with SHA-256 content hashes via `fixEngine.ts`.
+      - Human approval gate: requires explicit developer confirmation before applying any patch to disk.
+      - Safe verification & rollback: applies atomic patches, reruns checks, reports real exit codes, and provides verified rollback records via `rollbackAppliedFix`.
+      - Offline deterministic fallback: seamlessly falls back to `diagnosticEngine.ts` when Ollama is offline or unparseable. Zero cloud exfiltration.
+    - **Automated Tests:**
+      - `src/test/diagnosisEngine.test.ts`: 10 comprehensive automated scenarios covering tooling classification, grounded diagnosis, missing/invalid location rejection, offline fallback, hallucination rejection, approval gating, stale-file protection, successful re-verification, failed re-verification rollback, and full regression preservation.
+      - Total test suite: 129 tests across 20 suites (100% passing).
+  - **Files Created/Modified:**
+    - `src/analysis/types.ts` (created)
+    - `src/analysis/diagnosisEngine.ts` (created)
+    - `src/analysis/index.ts` (created)
+    - `src/test/diagnosisEngine.test.ts` (created)
+    - `PROJECT_STATUS.md` (updated)
+  - **Verification:**
+    - `npm run compile`: Compiled TypeScript cleanly with code 0.
+    - `npm test`: 129/129 tests passing in 2.27s across 20 suites.
+    - `npx @vscode/vsce ls`: Packaging manifest verified cleanly.
+
 - **Milestone 11: LLM-Assisted Pull Request Preparation**
   - Draft evidence-backed commit messages, PR titles, and markdown summaries from verified diffs and test results.
 - **Milestone 12: End-to-End Stress Testing & Final Presentation**
